@@ -8,6 +8,9 @@ import subprocess
 
 from env_api.scheduler.models.cost_model import Model_Recursive_LSTM_v2
 
+from env_api.scheduler.models.pre_trained_cost_model import Pre_trained_model
+from env_api.scheduler.models.autoencoder import AutoEncoder
+
 INIT_TIMEOUT = 5 * 5 * 60 + 4
 SLOWDOWN_TIMEOUT = 20
 
@@ -15,8 +18,16 @@ SLOWDOWN_TIMEOUT = 20
 class PredictionService:
 
     def __init__(self):
-        # This model uses the tags instead of matrices
-        self.tags_model = Model_Recursive_LSTM_v2(input_size=871, loops_tensor_size=8)
+        autoencoder = AutoEncoder()
+        autoencoder.eval()
+        encoder = autoencoder.encoder
+        encoder.eval()
+
+        self.tags_model = Pre_trained_model(
+        input_size=350,
+        loops_tensor_size=8,
+        pre_train_encoder=encoder
+    )
         # Loading the weights
         self.tags_model.load_state_dict(
             torch.load(Config.config.tiramisu.tags_model_weights, map_location="cpu")

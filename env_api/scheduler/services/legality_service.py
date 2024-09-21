@@ -26,10 +26,9 @@ class LegalityService:
         
         if isinstance(action, OtherAction):
             comps= copy.deepcopy(branches[current_branch].comps)
-            matrix = np.copy(schedule_object.schedule_mat[comps[0]]["matrix"])
-            action.params.append(copy.deepcopy(matrix))
+            nb_it = np.copy(schedule_object.schedule_mat[comps[0]]["nb_it"])
             # Check whether the indexes of the target element are not out of range 
-            if action.params[0] >= len(matrix) or  action.params[1] >= len(matrix[0]):
+            if action.params[0] >= nb_it or  action.params[1] >= nb_it:
                 return False
                   
         # Check first if the iterator(s) level(s) is(are) included in the current iterators
@@ -143,10 +142,6 @@ class LegalityService:
                         return True
                 # Becuase the second half of action.params contains tiling size, so we need only the first half of the vector
                 params = action.params[:len(action.params) // 2]
-                
-            elif isinstance(action, OtherAction):
-                # exclude the matrix from parameters
-                params = action.params[:-1]
 
             else:
                 params = action.params
@@ -188,7 +183,7 @@ class LegalityService:
 
 
     def check_affine_transformations(self,branches : List[Schedule],action : Action):
-        if isinstance(action,AffineAction):
+        if isinstance(action,AffineAction) or isinstance(action,OtherAction):
             for branch in branches :
                 for comp in action.comps:
                     if comp in branch.comps and branch.transformed == 4:

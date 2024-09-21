@@ -82,20 +82,20 @@ class Schedule:
             ]
     
     def __set_action_mask(self):
-        self.actions_mask = np.zeros(62)
+        self.actions_mask = np.zeros(52)
 
         if((type(self).__name__) == "Branch"):
             nb_it = len(self.prog.annotations["computations"][self.comps[0]]["iterators"])
             # mask add and addrow actions that target an element not included in the transformation matrix (out of range)
             if nb_it == 2:
                 self.actions_mask[32:41] = 1
-                self.actions_mask[43:61] = 1
+                self.actions_mask[33:51] = 1
             elif nb_it == 3:
                 self.actions_mask[34:41] = 1
-                self.actions_mask[47:61] = 1
+                self.actions_mask[37:51] = 1
             elif nb_it == 4:
                 self.actions_mask[37:41] = 1
-                self.actions_mask[53:61] = 1
+                self.actions_mask[43:51] = 1
 
     def __form_iterators_dict(self):
         for comp in self.comps:
@@ -181,11 +181,11 @@ class Schedule:
             nb_it = len(self.prog.annotations["computations"][comp]["iterators"])
             self.schedule_mat[comp]={"nb_it":nb_it,
                                     "transformed": False,
-                                    "matrix": np.identity(nb_it, dtype=np.int32)}
+                                    "matrices_list": []}
 
     
     def update_actions_mask(self, action : Action,applied : bool = True):
-        if (action.env_id not in range(31, 61)):
+        if (action.env_id not in range(31, 51)):
             # Whether an action is legal or not we should mask it to not use it again
             self.actions_mask[action.env_id] = 1
 
@@ -198,17 +198,14 @@ class Schedule:
     def apply_beam_search_conditions(self, action : Action):
         # The order of actions in beam search :
         # Fusion, add, [addrow, Interchange, reversal, skewing], parallelization, tiling, unrolling
-        if (isinstance(action,Interchange) or isinstance(action,Skewing) or isinstance(action, Reversal) or isinstance(action, Addrow)):
-            self.actions_mask[31:41] = 1
-            
         if (isinstance(action,Parallelization)):
             self.actions_mask[0:14] = 1
-            self.actions_mask[31:61] = 1
+            self.actions_mask[31:51] = 1
 
         elif (isinstance(action,Tiling)) : 
             self.actions_mask[0:26] = 1
-            self.actions_mask[31:61] = 1
+            self.actions_mask[31:51] = 1
 
         elif (isinstance(action,Unrolling)):
             self.actions_mask[0:31] = 1
-            self.actions_mask[31:61] = 1
+            self.actions_mask[31:51] = 1

@@ -179,12 +179,6 @@ class TiramisuEnvAPI:
         )
         # Use the Scheduler service to apply the Unrolling action to the schedule
         return self.scheduler_service.apply_action(unrolling)
-    
-    def add(self, row: int, col: int, env_id: int = None, worker_id=""):
-        # Create an Add action with given row and col
-        addAction = Add(params = [row, col], env_id=env_id, worker_id=worker_id)
-        # Use the Scheduler service to apply the Add action to the schedule
-        return self.scheduler_service.apply_action(addAction)
 
     def addrow(self, row_i: int, row_j: int,  env_id: int = None, worker_id=""):
         # Create an Addrow action with given row_i and row_j

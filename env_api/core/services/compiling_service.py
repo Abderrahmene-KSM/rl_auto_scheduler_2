@@ -8,6 +8,7 @@ from env_api.scheduler.models.branch import Branch
 from env_api.scheduler.models.schedule import Schedule
 from conf.config import Config
 from env_api.core.models.optim_cmd import OptimizationCommand
+import numpy as np
 
 
 class CompilingService:
@@ -303,9 +304,13 @@ class CompilingService:
         comps = schedule_mat.keys()
         # insert the instructions of affine transformations for each computation
         # In this format compXX.matrix_transform(<The tranformation matrix>)
+        comps = schedule_mat.keys()
         for comp in comps:
             if schedule_mat[comp]["transformed"]:
-                transformation_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(schedule_mat[comp]["matrix"]) +");"
+                global_matrix = np.identity(schedule_mat[comp]["nb_it"], dtype=np.int32)
+                for matrix in schedule_mat[comp]["matrices_list"]:
+                    global_matrix = np.dot(matrix, global_matrix)
+                transformation_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(global_matrix) +");"
                 schedule_code += "\n\t{}".format(comp) + transformation_str + "\n"
 
         if (tiling_in_actions):

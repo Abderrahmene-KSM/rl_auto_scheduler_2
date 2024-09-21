@@ -222,24 +222,6 @@ class OtherAction(Action):
     ):
         super().__init__(params, name, comps, env_id, worker_id)
 
-class Add(OtherAction):
-    def __init__(self, params: list, env_id: int = None, worker_id=""):
-        super().__init__(params, name=f"Add{params[0]}{params[1]}", env_id=env_id, worker_id=worker_id)
-        
-    def set_comps(self, comps):
-        super().set_comps(comps)
-        row = self.params[0]
-        col = self.params[1]
-        matrix = np.copy(self.params[-1])
-        matrix[row][col] = matrix[row][col] + 1
-        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
-        optim_str = ""
-        for comp in self.comps:
-            self.comps_schedule[comp] = f"A({row},{col})"
-            optim_str += "\n\t{}".format(comp) + addOne_str
-            
-        self.legality_code_str = self.execution_code_str = optim_str
-
 # row i = row i + row j
 class Addrow(OtherAction):
     def __init__(self, params: list, env_id: int = None, worker_id=""):
@@ -249,12 +231,8 @@ class Addrow(OtherAction):
         super().set_comps(comps)
         row_i = self.params[0]
         row_j = self.params[1]
-        matrix = np.copy(self.params[-1])
-        matrix[row_i] += matrix[row_j]
-        addrow_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
         optim_str = ""
         for comp in self.comps:
             self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
-            optim_str += "\n\t{}".format(comp) + addrow_str
             
         self.legality_code_str = self.execution_code_str = optim_str

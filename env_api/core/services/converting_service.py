@@ -102,9 +102,9 @@ class ConvertService:
             iterators_repr.extend([c_code + "-Unrolled", c_code + "-UnrollFactor"])
     
             # Add a placeholder for the other transformations to be applied (skewing, reversal, interchage, add, addrow)
-            iterators_repr.append(c_code + "-TransformationMatrixStart")
-            iterators_repr.extend(["M"] * (MAX_DEPTH * MAX_DEPTH - 2))
-            iterators_repr.append(c_code + "-TransformationMatrixEnd")
+            iterators_repr.append(c_code + "-TransformationMatricesStart")
+            iterators_repr.extend(["M"] * (MAX_DEPTH * MAX_DEPTH * MAX_NUM_TRANSFORMATIONS - 2))
+            iterators_repr.append(c_code + "-TransformationMatricesEnd")
             
             # Adding initial constraint matrix
             iterators_repr.append(c_code+'-OgConstraintMatrixStart')
@@ -750,19 +750,19 @@ class ConvertService:
             comps_repr[p_index[0]][p_index[1]] = unroll_factor
             
             # Check which transformations (interchange, reversal, skweing, add, addrow) were applied and add the global matriw that represent them all
-            padded_matrix = cls.get_padded_transformation_matrix(
-                program_json, schedule_json, comp_name
+            padded_matrices = cls.get_padded_transformation_matrices(
+                program_json, schedule_mat, comp_name
             )
             
-            matrix_start = comps_placeholders_indices_dict[ c_code + "-TransformationMatrixStart" ]
+            matrices_start = comps_placeholders_indices_dict[ c_code + "-TransformationMatricesStart" ]
             
-            matrix_end = comps_placeholders_indices_dict[c_code + "-TransformationMatrixEnd"]
+            matrices_end = comps_placeholders_indices_dict[c_code + "-TransformationMatricesEnd"]
             
-            nb_matrix_elements = matrix_end[1] - matrix_start[1] + 1
-            
-            assert len(padded_matrix) == nb_matrix_elements
-            
-            comps_repr[matrix_start[0]][matrix_start[1] : matrix_end[1] + 1] = padded_matrix
+            nb_matrices_elements = matrices_end[1] - matrices_start[1] + 1
+
+            assert len(padded_matrices) == nb_matrices_elements
+                
+            comps_repr[matrices_start[0]][matrices_start[1] : matrices_end[1] + 1] = padded_matrices
             
             # Add the padded original constraints matrix to the representation
             ogc_start = comps_placeholders_indices_dict[c_code+'-OgConstraintMatrixStart']
@@ -1119,6 +1119,32 @@ class ConvertService:
         return tags_list
 
     @classmethod
+    def get_padded_transformation_matrices(
+        cls, 
+        program_json, 
+        schedule_mat, 
+        comp_name
+    ):
+    
+        # Extract information about the computation and the transformations that were applied from the json input
+        comp_dict = program_json["computations"][comp_name]
+        comp_schedule_mat = schedule_mat[comp_name]
+        nb_iterators = len(comp_dict["iterators"])
+        
+        matrices_vector = []
+
+        for matrix in comp_schedule_mat["matrices_list"]:
+            matrix = matrix.tolist()
+            padded_matrix = [item for sublist in matrix for item in sublist]
+            padded_matrix += [0]*(MAX_DEPTH*MAX_DEPTH - len(padded_matrix))
+            matrices_vector += padded_matrix
+            
+        # Add padding in case the number of transformations is less than MAX_NUM_TRANSFORMATIONS
+        matrices_vector += [0]*(MAX_DEPTH*MAX_DEPTH*MAX_NUM_TRANSFORMATIONS - len(matrices_vector))
+        
+        return matrices_vector
+
+    @classmethod
     def seperate_vector(
         cls,
         X: torch.Tensor,
@@ -1128,11 +1154,11 @@ class ConvertService:
     ) -> torch.Tensor:
         batch_size, _ = X.shape
         first_part = X[:, :33]
-        second_part = X[:, 33 : 33 + MAX_DEPTH * MAX_DEPTH]
-        third_part = X[:, 33 + MAX_DEPTH * MAX_DEPTH :]
+        second_part = X[:, 33 : 33 + MAX_DEPTH * MAX_DEPTH * num_transformations]
+        third_part = X[:, 33 + MAX_DEPTH * MAX_DEPTH * num_transformations :]
         vectors = []
         for i in range(num_transformations):
-            vector = second_part[:, MAX_TAGS * i : MAX_TAGS * (i + 1)].reshape(
+            vector = second_part[:, MAX_DEPTH * MAX_DEPTH * i : MAX_DEPTH * MAX_DEPTH * (i + 1)].reshape(
                 batch_size, 1, -1
             )
             vectors.append(vector)
@@ -1148,9 +1174,19 @@ class ConvertService:
         """
         This function returns the necessary dict and tensors to feed the cost model to get the speedup
         """
+        x = comps_tensor
+        batch_size, num_comps, __dict__ = x.shape
+        x = x.view(batch_size * num_comps, -1)
+        (first_part, vectors, third_part) = ConvertService.seperate_vector(
+            x, num_transformations=4, pad=False
+        )
+        first_part = first_part.view(batch_size, num_comps, -1)
+        third_part = third_part.view(batch_size, num_comps, -1)
         return (
             schedule_object.repr.prog_tree,
-            comps_tensor,
+            first_part,
+            vectors,
+            third_part,
             loops_tensor,
             comps_expr_repr,
         )

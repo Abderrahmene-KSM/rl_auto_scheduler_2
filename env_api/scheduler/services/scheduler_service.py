@@ -197,9 +197,6 @@ class SchedulerService:
 
         elif isinstance(action, Skewing):
             self.apply_skewing(action=action)
-        
-        elif isinstance(action, Add):
-            self.apply_add(action=action)
 
         elif isinstance(action, Addrow):
             self.apply_addrow(action=action)
@@ -236,7 +233,7 @@ class SchedulerService:
             # Update main schedule
             self.schedule_object.schedule_dict[comp]["transformations_list"].append(transformation)
             # Update the matrice of transformations
-            self.schedule_object.schedule_mat[comp]["matrix"] = np.dot(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]), self.schedule_object.schedule_mat[comp]["matrix"])
+            self.schedule_object.schedule_mat[comp]["matrices_list"].append(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"])) 
             # mark the computation as transformed
             self.schedule_object.schedule_mat[comp]["transformed"] = True
             
@@ -246,7 +243,7 @@ class SchedulerService:
                      # Update the schedule
                     branch.schedule_dict[comp]["transformations_list"].append(transformation)
                     # Update the matrice of transformations
-                    branch.schedule_mat[comp]["matrix"] = np.dot(ConvertService.get_trasnformation_matrix_from_vector(transformation,branch.schedule_mat[comp]["nb_it"]), branch.schedule_mat[comp]["matrix"])
+                    branch.schedule_mat[comp]["matrices_list"].append(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"])) 
 
         for branch in self.branches : 
             for comp in action.comps : 
@@ -271,7 +268,7 @@ class SchedulerService:
             # Update main schedule
             self.schedule_object.schedule_dict[comp]["transformations_list"].append(transformation)
             # Update the matrice of transformations
-            self.schedule_object.schedule_mat[comp]["matrix"] = np.dot(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]), self.schedule_object.schedule_mat[comp]["matrix"])
+            self.schedule_object.schedule_mat[comp]["matrices_list"].append(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]))
             # mark the computation as transformed
             self.schedule_object.schedule_mat[comp]["transformed"] = True
             
@@ -281,9 +278,10 @@ class SchedulerService:
                      # Update the schedule
                     branch.schedule_dict[comp]["transformations_list"].append(transformation)
                     # Update the matrice of transformations
-                    branch.schedule_mat[comp]["matrix"] = np.dot(ConvertService.get_trasnformation_matrix_from_vector(transformation,branch.schedule_mat[comp]["nb_it"]), branch.schedule_mat[comp]["matrix"])
+                    branch.schedule_mat[comp]["matrices_list"].append(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]))
                     # For the affine transformations we must keep track of how many of them are applied
                     # inside the variable branch.transformed , the limit is 4
+
         for branch in self.branches : 
             for comp in action.comps : 
                 if (comp in branch.comps):
@@ -308,7 +306,7 @@ class SchedulerService:
             # Update main schedule
             self.schedule_object.schedule_dict[comp]["transformations_list"].append(transformation)
             # Update the matrice of transformations
-            self.schedule_object.schedule_mat[comp]["matrix"] = np.dot(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]), self.schedule_object.schedule_mat[comp]["matrix"])
+            self.schedule_object.schedule_mat[comp]["matrices_list"].append(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]))
             # mark the computation as transformed
             self.schedule_object.schedule_mat[comp]["transformed"] = True
             
@@ -318,9 +316,10 @@ class SchedulerService:
                      # Update the schedule
                     branch.schedule_dict[comp]["transformations_list"].append(transformation)
                     # Update the matrice of transformations
-                    branch.schedule_mat[comp]["matrix"] = np.dot(ConvertService.get_trasnformation_matrix_from_vector(transformation,branch.schedule_mat[comp]["nb_it"]), branch.schedule_mat[comp]["matrix"])
+                    branch.schedule_mat[comp]["matrices_list"].append(ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]))
                     # For the affine transformations we must keep track of how many of them are applied
                     # inside the variable branch.transformed , the limit is 4
+
         for branch in self.branches : 
             for comp in action.comps : 
                 if (comp in branch.comps):
@@ -364,38 +363,32 @@ class SchedulerService:
             # Update the branch schedule 
             self.branches[self.current_branch].schedule_dict[comp]["unrolling_factor"] = str(action.params[1])
 
-    def apply_add(self, action):
-        row = action.params[0]
-        col = action.params[1]
-        for comp in action.comps:
-            # Update the main schedule
-            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
-            matrix[row][col] = matrix[row][col] + 1
-            self.schedule_object.schedule_mat[comp]["transformed"] = True
-            
-            for branch in self.branches : 
-                # Check for the branches that needs to be updated
-                if (comp in branch.comps):
-                     # Update the branch schedules
-                    matrix = branch.schedule_mat[comp]["matrix"]
-                    matrix[row][col] = matrix[row][col] + 1
-                    branch.schedule_mat[comp]["transformed"] = True
 
     def apply_addrow(self, action):
         row_i = action.params[0]
         row_j = action.params[1]
         for comp in action.comps:
             # Update the main schedule
-            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
-            matrix[row_i] += matrix[row_j]
+            matrix = np.identity(self.schedule_object.schedule_mat[comp]["nb_it"], dtype=np.int32)
+            matrix[row_i][row_j]=1
+            self.schedule_object.schedule_mat[comp]["matrices_list"].append(matrix)
             self.schedule_object.schedule_mat[comp]["transformed"] = True
             
             for branch in self.branches : 
                     # Check for the branches that needs to be updated
                     if (comp in branch.comps):
-                        # Update the branch schedules
-                        matrix = branch.schedule_mat[comp]["matrix"]
-                        matrix[row_i] += matrix[row_j]
+                         # Update the branch schedules
+                        matrix = np.identity(branch.schedule_mat[comp]["nb_it"], dtype=np.int32)
+                        matrix[row_i][row_j]=1
+                        branch.schedule_mat[comp]["matrices_list"].append(matrix)
                         branch.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+            for comp in action.comps : 
+                if (comp in branch.comps):
+                    # For the affine transformations we must keep track of how many of them are applied
+                    # inside the variable branch.transformed , the limit is 4
+                    branch.transformed+=1
+                    break
             
    
