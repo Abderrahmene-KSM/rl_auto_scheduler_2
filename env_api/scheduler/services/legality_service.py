@@ -13,10 +13,6 @@ class LegalityService:
         The legality service is responsible to evaluate the legality of tiramisu programs given a specific schedule
         '''
         pass 
-    
-    def is_matrix_unimodular(self, matrix):
-        det_value = np.linalg.det(matrix)
-        return det_value == 1 or det_value == -1
 
     def is_action_legal(self,schedule_object: Schedule,branches: List[Schedule],current_branch:int ,action: Action):
         """
@@ -29,18 +25,11 @@ class LegalityService:
         branches[current_branch].update_actions_mask(action=action, applied=False)
         
         if isinstance(action, OtherAction):
-            action_name = type(action).__name__
             comps= copy.deepcopy(branches[current_branch].comps)
             matrix = np.copy(schedule_object.schedule_mat[comps[0]]["matrix"])
-            action.params=copy.deepcopy([matrix])
-            matrix2 = np.copy(matrix)
-            row = int(action_name[-2])
-            col = int(action_name[-1])
-            if row >= len(matrix2) or col >= len(matrix2[0]):
-                return False
-            matrix2[row][col] = matrix2[row][col] + 1
-            unimodularity_check = self.is_matrix_unimodular(matrix2)
-            if not unimodularity_check:
+            action.params.append(copy.deepcopy(matrix))
+            # Check whether the indexes of the target element are not out of range 
+            if action.params[0] >= len(matrix) or  action.params[1] >= len(matrix[0]):
                 return False
                   
         # Check first if the iterator(s) level(s) is(are) included in the current iterators
@@ -157,10 +146,7 @@ class LegalityService:
                 
             elif isinstance(action, OtherAction):
                 # exclude the matrix from parameters
-                action_name = type(action).__name__
-                row = int(action_name[-2])
-                col = int(action_name[-1])
-                params = [row,col]
+                params = action.params[:-1]
 
             else:
                 params = action.params

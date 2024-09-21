@@ -87,8 +87,6 @@ class CompilingService:
 
     @classmethod
     def run_cpp_code(cls, cpp_code: str, output_path: str):
-        # print(Config.config.env_vars.CONDA_ENV)
-        # print(Config.config.env_vars.LD_LIBRARY_PATH)
         shell_script = [
             f"export CONDA_ENV={Config.config.env_vars.CONDA_ENV}",
 
@@ -289,6 +287,7 @@ class CompilingService:
             if isinstance(optim, Unrolling): 
                 unrolling_updated += optim.execution_code_str
             elif not isinstance(optim, OtherAction) and not isinstance(optim, AffineAction) : 
+                # insert instruction for parallelization, tiling and fusion 
                 schedule_code += optim.execution_code_str
             
             if isinstance(optim, Tiling):
@@ -302,6 +301,8 @@ class CompilingService:
                         )
                         
         comps = schedule_mat.keys()
+        # insert the instructions of affine transformations for each computation
+        # In this format compXX.matrix_transform(<The tranformation matrix>)
         for comp in comps:
             if schedule_mat[comp]["transformed"]:
                 transformation_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(schedule_mat[comp]["matrix"]) +");"
@@ -343,8 +344,6 @@ class CompilingService:
         timeout: int = None
     ):
         execution_time = None
-
-        print("schedule_list:", optims_list)
         
         cpp_code = cls.get_schedule_code(
             tiramisu_program=tiramisu_program,
@@ -352,10 +351,6 @@ class CompilingService:
             schedule_mat=schedule_mat,
         )
         
-        #print()
-        #print(cpp_code)
-        #print()
-
         output_path = f"{Config.config.tiramisu.workspace}{tiramisu_program.name}"
 
         cpp_file_path = output_path + "_schedule.cpp"

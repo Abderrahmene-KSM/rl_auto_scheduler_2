@@ -86,7 +86,7 @@ class Schedule:
 
         if((type(self).__name__) == "Branch"):
             nb_it = len(self.prog.annotations["computations"][self.comps[0]]["iterators"])
-            # mask add and gauss actions that target an element not included in the transformation matrix (out of range)
+            # mask add and addrow actions that target an element not included in the transformation matrix (out of range)
             if nb_it == 2:
                 self.actions_mask[32:41] = 1
                 self.actions_mask[43:61] = 1
@@ -185,7 +185,7 @@ class Schedule:
 
     
     def update_actions_mask(self, action : Action,applied : bool = True):
-        if (action.env_id not in [31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,60]):
+        if (action.env_id not in range(31, 61)):
             # Whether an action is legal or not we should mask it to not use it again
             self.actions_mask[action.env_id] = 1
 
@@ -197,9 +197,9 @@ class Schedule:
         
     def apply_beam_search_conditions(self, action : Action):
         # The order of actions in beam search :
-        # Fusion, [Interchange, reversal, skewing], parallelization, tiling, unrolling
-        if (isinstance(action,Interchange) or isinstance(action,Skewing) or isinstance(action, Reversal)):
-            self.actions_mask[31:61] = 1
+        # Fusion, add, [addrow, Interchange, reversal, skewing], parallelization, tiling, unrolling
+        if (isinstance(action,Interchange) or isinstance(action,Skewing) or isinstance(action, Reversal) or isinstance(action, Addrow)):
+            self.actions_mask[31:41] = 1
             
         if (isinstance(action,Parallelization)):
             self.actions_mask[0:14] = 1

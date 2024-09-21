@@ -1,0 +1,57 @@
+tiramisu:
+    tiramisu_path: Path to tiramisu
+    env_type:  "cpu" # model | cpu (execution)
+    tags_model_weights: Path to the cost model weights
+    workspace: Path to the workspace where execution files will be generated
+
+env_vars:
+    CONDA_ENV : Path to the conda environement
+    LD_LIBRARY_PATH: "${CONDA_ENV}/lib:${TIRAMISU_ROOT}/3rdParty/Halide/install/lib64:${TIRAMISU_ROOT}/3rdParty/llvm/build/lib:${TIRAMISU_ROOT}/3rdParty/isl/build/lib:"
+
+
+dataset:        
+    dataset_format: PICKLE
+    cpps_path: Path to the programs' cpp files
+    dataset_path: Path to the schedules  
+    save_path: Path where the updated schedules will be stored
+    shuffle: True
+    seed: 13
+    saving_frequency: 100 (Frequency of saving the updated schedules)
+    # When doing evaluation on the benchmark set the value to True
+    is_benchmark: False
+    benchmark_cpp_files: Path to the programs' cpp files used for evaluation
+    benchmark_dataset_path: Path to the schedules used for evaluation
+
+
+ray:
+    results: Path where to store result
+    restore_checkpoint: Path of the checkpoint
+
+experiment:
+    name: Experiment name
+    checkpoint_frequency: 20
+    checkpoint_num_to_keep: 30
+    # The following 3 values are the values to stop the experiment once one of them is reached 
+    training_iteration: 80000
+    timesteps_total: 10000000
+    episode_reward_mean: 10
+    # Use this value to punish or tolerate illegal actions from being taken
+    legality_speedup: 1.0
+    # Use the order of beam search 
+    beam_search_order : True
+    entropy_coeff: 0.00001
+    # Training parameters
+    train_batch_size: 4096 
+    minibatch_size: 128
+    lr: 0.00001
+    vf_loss_coeff: 1
+    # Policy model type
+    policy_model: "lstm" #"lstm" #| "ff" #feed-forward
+    # In mode "ff" set vf_share_layers to True if you want to use shared weights between policy and value function 
+    # in mode "lstm" , you must make vf_share_layers = True
+    vf_share_layers: True
+
+lstm_policy:
+    fc_size: 1024
+    lstm_state_size: 512
+    num_layers: 1

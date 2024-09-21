@@ -42,8 +42,6 @@ if __name__ == "__main__":
     if (num_workers == -1):
         num_workers = int(ray.available_resources()['CPU'])
 
-    #print(f"num workers: {num_workers}")
-    #print(f"dataset size: {dataset_size}")
 
     num_programs_per_task = dataset_size // num_workers
     programs_remaining = dataset_size % num_workers
@@ -76,7 +74,6 @@ if __name__ == "__main__":
         explorations.append(benchmark_actor.explore_benchmarks.remote())
 
     print(len(explorations))
-    #print("number of explorations printed***************************")
     
     while len(explorations) > 0:
         # Wait for actors to finish their exploration
@@ -85,14 +82,8 @@ if __name__ == "__main__":
             f"Done this iteration: {len(done)} / Remaining {len(explorations)}")
         # retrieve explored programs from actors that finished their exploration    
         for actor in done:
-            #print("Before actor_programs***************************")
             actor_programs = ray.get(actor)            
-            #print("After actor_programs***************************")
-            #print("Before explored_programs***************************")
             explored_programs.update(actor_programs)
-            #print("After explored_programs***************************")
-
-        #print("After loop actor in done***************************")
         
         progress = ray.get([actor.get_progress.remote() for actor in actors])
         print(f"Progress: {sum(progress)} / {dataset_size}")

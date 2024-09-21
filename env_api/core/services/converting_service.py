@@ -22,6 +22,7 @@ MAX_NUM_TRANSFORMATIONS = 4
 # Maximum size of the tags vector representing each transformation
 MAX_TAGS = 16
 
+# Maximum depth of branches 
 MAX_DEPTH = 5
 
 # Maximum length of expressions in the dataset
@@ -100,11 +101,7 @@ class ConvertService:
             # Add two tags for whether unrolling was applied and the unrolling factor
             iterators_repr.extend([c_code + "-Unrolled", c_code + "-UnrollFactor"])
     
-            # Add a placeholder for the other transformations to be applied (skewing, reversal and interchage)
-            # iterators_repr.append(c_code + "-TransformationTagsStart")
-            # iterators_repr.extend(["M"] * (MAX_TAGS * MAX_NUM_TRANSFORMATIONS - 2))
-            # iterators_repr.append(c_code + "-TransformationTagsEnd")
-            
+            # Add a placeholder for the other transformations to be applied (skewing, reversal, interchage, add, addrow)
             iterators_repr.append(c_code + "-TransformationMatrixStart")
             iterators_repr.extend(["M"] * (MAX_DEPTH * MAX_DEPTH - 2))
             iterators_repr.append(c_code + "-TransformationMatrixEnd")
@@ -582,7 +579,10 @@ class ConvertService:
         )
         return result
 
+    
+    
     @classmethod
+    # return the transformation matrix given the tag vector
     def get_trasnformation_matrix_from_vector(cls, transformation, matrix_size):
         matrix = np.identity(matrix_size)
 
@@ -749,11 +749,7 @@ class ConvertService:
             p_index = comps_placeholders_indices_dict[c_code + "-UnrollFactor"]
             comps_repr[p_index[0]][p_index[1]] = unroll_factor
             
-            # Check which transformations (interchange, reversal and skweing) were applied and add the padded vector representation to their corresponding position
-            # padded_tags = get_padded_transformation_tags(
-            #     program_json, schedule_json, comp_name
-            # )
-            
+            # Check which transformations (interchange, reversal, skweing, add, addrow) were applied and add the global matriw that represent them all
             padded_matrix = cls.get_padded_transformation_matrix(
                 program_json, schedule_json, comp_name
             )
@@ -1046,7 +1042,7 @@ class ConvertService:
         return result
     
     @classmethod
-    # add padding to the transfomation matrix
+    # generate the global matrix that represents all the affines transformation
     def get_padded_transformation_matrix(
         cls, program_json, schedule_json, comp_name
     ):
@@ -1152,23 +1148,10 @@ class ConvertService:
         """
         This function returns the necessary dict and tensors to feed the cost model to get the speedup
         """
-        # x = comps_tensor
-        # batch_size, num_comps, __dict__ = x.shape
-        # x = x.view(batch_size * num_comps, -1)
-        # (first_part, vectors, third_part) = ConvertService.seperate_vector(
-        #     x, num_transformations=4, pad=False
-        # )
-        # first_part = first_part.view(batch_size, num_comps, -1)
-        # third_part = third_part.view(batch_size, num_comps, -1)
         return (
             schedule_object.repr.prog_tree,
-            # first_part,
-            # vectors,
-            # third_part,
             comps_tensor,
             loops_tensor,
-            # schedule_object.repr.comps_expr_tensor,
-            # schedule_object.repr.comps_expr_lengths,
             comps_expr_repr,
         )
 

@@ -180,125 +180,17 @@ class TiramisuEnvAPI:
         # Use the Scheduler service to apply the Unrolling action to the schedule
         return self.scheduler_service.apply_action(unrolling)
     
-    def add01(self, env_id: int = None, worker_id=""):
-        addAction = Add01(env_id=env_id, worker_id=worker_id)
+    def add(self, row: int, col: int, env_id: int = None, worker_id=""):
+        # Create an Add action with given row and col
+        addAction = Add(params = [row, col], env_id=env_id, worker_id=worker_id)
+        # Use the Scheduler service to apply the Add action to the schedule
         return self.scheduler_service.apply_action(addAction)
 
-    def add02(self, env_id: int = None, worker_id=""):
-        addAction = Add02(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def add03(self, env_id: int = None, worker_id=""):
-        addAction = Add03(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def add04(self, env_id: int = None, worker_id=""):
-        addAction = Add04(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def add12(self, env_id: int = None, worker_id=""):
-        addAction = Add12(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def add13(self, env_id: int = None, worker_id=""):
-        addAction = Add13(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def add14(self, env_id: int = None, worker_id=""):
-        addAction = Add14(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def add23(self, env_id: int = None, worker_id=""):
-        addAction = Add23(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def add24(self, env_id: int = None, worker_id=""):
-        addAction = Add24(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def add34(self, env_id: int = None, worker_id=""):
-        addAction = Add34(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(addAction)
-
-    def gauss01(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss01(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss02(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss02(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss03(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss03(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss04(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss04(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss10(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss10(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss12(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss12(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss13(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss13(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss14(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss14(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss20(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss20(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss21(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss21(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss23(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss23(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss24(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss24(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss30(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss30(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss31(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss31(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss32(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss32(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss34(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss34(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss40(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss40(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss41(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss41(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss42(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss42(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
-
-    def gauss43(self, env_id: int = None, worker_id=""):
-        gaussAction = Gauss43(env_id=env_id, worker_id=worker_id)
-        return self.scheduler_service.apply_action(gaussAction)
+    def addrow(self, row_i: int, row_j: int,  env_id: int = None, worker_id=""):
+        # Create an Addrow action with given row_i and row_j
+        addrowAction = Addrow(params = [row_i, row_j], env_id=env_id, worker_id=worker_id)
+        # Use the Scheduler service to apply the Addrow action to the schedule
+        return self.scheduler_service.apply_action(addrowAction)
 
     def save_legality_dataset(self, suffix: str = ""):
         self.dataset_service.store_offline_dataset(suffix=suffix)
