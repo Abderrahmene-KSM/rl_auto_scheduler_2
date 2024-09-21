@@ -1,11 +1,7 @@
-from copy import deepcopy
-from typing import Any, Dict, Tuple
+from typing import List
+import numpy as np
 
-from env_api.utils.data_preprocessors import (
-    construct_tree_structure,
-    get_ancestory_register,
-)
-
+from env_api.core.services.converting_service import ConvertService
 
 class Action:
     def __init__(
@@ -26,11 +22,21 @@ class Action:
         # of the same function by different workers
         self.worker_id = worker_id
 
-    def __str__(self) -> str:
-        return f"\n{self.name}(params={self.params}, comps={self.comps})"
+        self.legality_code_str = ""
+        self.execution_code_str = ""
 
-    def __repr__(self) -> str:
-        return f"\n{self.name}(params={self.params}, comps={self.comps})"
+        self.comps_schedule = {}
+    
+    def set_comps(self, comps):
+        self.comps = comps
+
+    def apply_on_branches(self, branches):
+        for comp in self.comps:
+            for branch in branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                    # Update the actions mask 
+                    branch.update_actions_mask(action=self)
 
 
 class AffineAction(Action):
@@ -44,213 +50,715 @@ class AffineAction(Action):
     ):
         super().__init__(params, name, comps, env_id, worker_id)
 
+    def set_comps(self, comps):
+        super().set_comps(comps)
+
+    def apply_on_branches(self, branches):
+        super().apply_on_branches(branches)
+
 
 class Reversal(AffineAction):
     def __init__(self, params: list, env_id: int = None, worker_id=""):
         super().__init__(params, name="Reversal", env_id=env_id, worker_id=worker_id)
+
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        loop_level = self.params[0]
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = f"R(L{loop_level})"
+            optim_str += f"\n\t{comp}.loop_reversal({loop_level});"
+
+        self.legality_code_str = self.execution_code_str = optim_str
 
 
 class Interchange(AffineAction):
     def __init__(self, params: list, env_id: int = None, worker_id=""):
         super().__init__(params, name="Interchange", env_id=env_id, worker_id=worker_id)
 
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        loop_level1 , loop_level2 = self.params
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = f"I(L{loop_level1},L{loop_level2})"
+            optim_str += f"\n\t{comp}.interchange({loop_level1}, {loop_level2});"
+
+        self.legality_code_str = self.execution_code_str = optim_str
+
 
 class Skewing(AffineAction):
     def __init__(self, params: list, env_id: int = None, worker_id=""):
         super().__init__(params, name="Skewing", env_id=env_id, worker_id=worker_id)
-        self.loop_to_parallelize = None
 
+    def set_comps(self, comps):
+        super().set_comps(comps)
+
+    def set_factors(self, factors):
+        self.params.extend(factors)
+
+        loop_level1, loop_level2, factor1, factor2 = self.params
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = f"S(L{loop_level1},L{loop_level2},{factor1},{factor2})"
+            optim_str += f"\n\t{comp}.skew({loop_level1}, {loop_level2}, {factor1}, {factor2});"
+        
+        self.legality_code_str = self.execution_code_str = optim_str
 
 class Parallelization(Action):
     def __init__(self, params: list, env_id: int = None, worker_id=""):
         super().__init__(
             params, name="Parallelization", env_id=env_id, worker_id=worker_id
         )
+    def set_comps(self, comps):
+        super().set_comps(comps)
+
+        loop_level = self.params[0]
+
+        for comp in self.comps:
+            self.comps_schedule[comp] = f"P(L{loop_level})"
+        
+        comp = self.comps[0]
+
+        self.execution_code_str = f"\n\t{comp}.tag_parallel_level({loop_level});"
+        
+        self.legality_code_str = (
+        f"""\n\tprepare_schedules_for_legality_checks(true);
+        is_legal &= loop_parallelization_is_legal({loop_level}, {{&{",&".join(self.comps)}}});
+        {self.execution_code_str}
+        """
+        )
+        
 
 
 class Unrolling(Action):
     def __init__(self, params: list, env_id: int = None, worker_id=""):
         super().__init__(params, name="Unrolling", env_id=env_id, worker_id=worker_id)
 
+    def set_comps(self, comps):
+        super().set_comps(comps)
+
+        loop_level , factor = self.params
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = f"U(L{loop_level},{factor})"
+            optim_str += f"\n\t{comp}.unroll({loop_level},{factor});"
+
+        self.execution_code_str = optim_str
+
+        self.legality_code_str = (
+        f"""\n\tprepare_schedules_for_legality_checks(true);
+        is_legal &= loop_unrolling_is_legal({loop_level}, {{&{",&".join(self.comps)}}});
+        {self.execution_code_str}
+        """
+        )
+
+    def set_params(self, additional_loops):
+        loop_level , factor = self.params
+        loop_level += additional_loops
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = f"U(L{loop_level},{factor})"
+            optim_str += f"\n\t{comp}.unroll({loop_level},{factor});"
+
+        self.execution_code_str = optim_str
+
+        self.legality_code_str = (
+        f"""\n\tprepare_schedules_for_legality_checks(true);
+        is_legal &= loop_unrolling_is_legal({loop_level}, {{&{",&".join(self.comps)}}});
+        {self.execution_code_str}
+        """
+        )       
+
+    def apply_on_branches(self, branches, current_branch : int ):
+        branches[current_branch].update_actions_mask(action=self)
+
+
 
 class Tiling(Action):
     def __init__(self, params: list, env_id: int = None, worker_id=""):
         super().__init__(params, name="Tiling", env_id=env_id, worker_id=worker_id)
-        self.subtilings = []
 
-    def __str__(self) -> str:
-        size = len(self.params) // 2
+    def set_comps(self, comps):
+        super().set_comps(comps)
 
-        return (
-            f"\nTiling {size}D : on levels "
-            + ",".join([str(x) for x in self.params[:size]])
-            + " on comps "
-            + ",".join(self.comps)
-            + "".join([str(tiling) for tiling in self.subtilings])
-        )
+        size = len(self.params)//2
+        loop_args = "".join([f"L{c}," for c in self.params[:size]])
+        factor_args = ",".join([f"{c}" for c in self.params[size:]])
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = f"T{size}({loop_args}{factor_args})"
+            optim_str += f"\n\t{comp}.tile({','.join([str(p) for p in self.params])});"
 
+        self.execution_code_str = self.legality_code_str = optim_str
+
+    def apply_on_branches(self, branches, schedule_list: List[Action]):
+        tiling_depth = len(self.params)//2
+        for comp in self.comps:
+            for branch in branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                    # Update the actions mask 
+                    branch.update_actions_mask(action=self)
+                    branch.additional_loops = tiling_depth
+
+            for optim in schedule_list: 
+                if isinstance(optim, Unrolling):
+                    if comp in optim.comps:
+                        optim.set_params(additional_loops=tiling_depth)
 
 class Fusion(Action):
     def __init__(self, params: list, env_id: int = None, worker_id=""):
         super().__init__(params, name="Fusion", env_id=env_id, worker_id=worker_id)
-
-    @staticmethod
-    def get_tree_structure_after_fusion(
-        fusion_candidates: Tuple[str, str], program_annotations: Dict[str, Any]
+        
+class OtherAction(Action):
+    def __init__(
+        self,
+        name: str,
+        params: list = [],
+        comps: list = [],
+        env_id: int = None,
+        worker_id="",
     ):
-        """
-        Construct the tree structure of the program then fuse the two computations in the tree structure
+        super().__init__(params, name, comps, env_id, worker_id)
+        
+class Add01(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add01", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[0][1] = matrix[0][1] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({0},{1})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        Args:
-            fusion_candidates (Tuple[str, str]): The two computations to be fused
-            program_annotations (Dict[str, Any]): The program annotations
+class Add02(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add02", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[0][2] = matrix[0][2] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({0},{2})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        Returns:
-            Dict[str, Any]: The tree structure of the program after fusing the two computations
-        """
-        first_comp, second_comp = fusion_candidates
-        first_comp_dict = program_annotations["computations"][first_comp]
-        second_comp_dict = program_annotations["computations"][second_comp]
+class Add03(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add03", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[0][3] = matrix[0][3] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({0},{3})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # The computations to be fused should be consecutive (following the c++ autischeduler)
-        assert (
-            first_comp_dict["absolute_order"] + 1 == second_comp_dict["absolute_order"]
-        ), f"The two computations to be fused are not consecutive ({first_comp_dict['absolute_order']}, {second_comp_dict['absolute_order']})"
+class Add04(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add04", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[0][4] = matrix[0][4] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({0},{4})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        iterator_first_comp = first_comp_dict["iterators"][-1]
-        iterator_second_comp = second_comp_dict["iterators"][-1]
+class Add12(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add12", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[1][2] = matrix[1][2] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({1},{2})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # The computations to be fused should have different parent iterators otherwise they are already fused
-        assert (
-            iterator_first_comp != iterator_second_comp
-        ), "The two computations to be fused have the same parent iterator"
+class Add13(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add13", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[1][3] = matrix[1][3] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({1},{3})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # Construct the tree structure of the initial program
-        tree_structure = construct_tree_structure(program_annotations)
+class Add14(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add14", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[1][4] = matrix[1][4] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({1},{4})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # get ancestory register of first_comp
-        first_comp_ancestory = get_ancestory_register(first_comp_dict, tree_structure)
-        second_comp_ancestory = get_ancestory_register(second_comp_dict, tree_structure)
+class Add23(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add23", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[2][3] = matrix[2][3] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({2},{3})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        first_comp_parent_dict = first_comp_ancestory[iterator_first_comp]
-        second_comp_parent_dict = second_comp_ancestory[iterator_second_comp]
+class Add24(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add24", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[2][4] = matrix[2][4] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({2},{4})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # copy the child iterators and computations of the second computation iterator to the first computation
-        first_comp_parent_dict["child_list"].extend(
-            second_comp_parent_dict["child_list"]
-        )
-        first_comp_parent_dict["computations_list"].extend(
-            second_comp_parent_dict["computations_list"]
-        )
+class Add34(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Add34", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        matrix = np.copy(self.params[0])
+        matrix[3][4] = matrix[3][4] + 1
+        addOne_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A({3},{4})"
+            optim_str += "\n\t{}".format(comp) + addOne_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # emptry the child iterators and computations of the second computation iterator
-        second_comp_parent_dict["child_list"] = []
-        second_comp_parent_dict["computations_list"] = []
+# row i = row i + row j
+class Gauss01(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss01", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 0
+        row_j = 1
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # Remove empty iterators (both computations and iterators) from the tree structure
-        for idx, ancestor in reversed(list(enumerate(second_comp_dict["iterators"]))):
-            ancestor_dict = second_comp_ancestory[ancestor]
-            # if the iterator has no child iterators and no computations
-            if (
-                len(ancestor_dict["child_list"]) == 0
-                and len(ancestor_dict["computations_list"]) == 0
-            ):
-                # remove the iterator from its parent iterators
-                if idx - 1 >= 0:
-                    parent_dict = second_comp_ancestory[
-                        second_comp_dict["iterators"][idx - 1]
-                    ]
-                    parent_dict["child_list"].remove(ancestor_dict)
-                else:
-                    # if the iterator is a root iterator then remove it from the roots list
-                    tree_structure["roots"].remove(ancestor_dict)
-            else:
-                break
+class Gauss02(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss02", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 0
+        row_j = 2
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        return tree_structure
+class Gauss03(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss03", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 0
+        row_j = 3
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-    @staticmethod
-    def fuse_annotations(
-        fusion_candidates: Tuple[str, str], program_annotations_dict: Dict[str, Any]
-    ):
-        """
-        Fuses the two computations in the program annotations dictionary
+class Gauss04(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss04", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 0
+        row_j = 4
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        Args:
-            fusion_candidates (Tuple[str, str]): The two computations to be fused
-            program_annotations_dict (Dict[str, Any]): The program annotations
+class Gauss10(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss10", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 1
+        row_j = 0
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        Returns:
-            Dict[str, Any]: The program annotations after fusing the two computations
-        """
-        # Make a deep copy of the program annotations
-        program_annotations = deepcopy(program_annotations_dict)
-        first_comp, second_comp = fusion_candidates
-        first_comp_dict = program_annotations["computations"][first_comp]
-        second_comp_dict = program_annotations["computations"][second_comp]
+class Gauss12(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss12", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 1
+        row_j = 2
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        assert (
-            first_comp_dict["absolute_order"] + 1 == second_comp_dict["absolute_order"]
-        ), f"The two computations to be fused are not consecutive ({first_comp_dict['absolute_order']}, {second_comp_dict['absolute_order']})"
+class Gauss13(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss13", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 1
+        row_j = 3
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        iterator_first_comp = first_comp_dict["iterators"][-1]
-        iterator_second_comp = second_comp_dict["iterators"][-1]
+class Gauss14(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss14", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 1
+        row_j = 4
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        assert (
-            iterator_first_comp != iterator_second_comp
-        ), "The two computations to be fused have the same parent iterator"
+class Gauss20(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss20", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 2
+        row_j = 0
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # Get the iterators of the computations to be fused
-        iterator_first_comp_dict = program_annotations["iterators"][iterator_first_comp]
-        iterator_second_comp_dict = program_annotations["iterators"][
-            iterator_second_comp
-        ]
+class Gauss21(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss21", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 2
+        row_j = 1
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # copy the child iterators and computations of the second computation iterator to the first computation
-        iterator_first_comp_dict["child_iterators"].extend(
-            iterator_second_comp_dict["child_iterators"]
-        )
-        iterator_first_comp_dict["computations_list"].extend(
-            iterator_second_comp_dict["computations_list"]
-        )
+class Gauss23(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss23", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 2
+        row_j = 3
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # change the parent iterator of all the sencode computation's iterators to the first computation's iterator
-        for child_iterator in iterator_second_comp_dict["child_iterators"]:
-            child_iterator_dict = program_annotations["iterators"][child_iterator]
-            child_iterator_dict["parent_iterator"] = iterator_first_comp
-            # change the ancestory of the child iterator's computations to the first computation's ancestory
-            for computation in child_iterator_dict["computations_list"]:
-                computation_dict = program_annotations["computations"][computation]
-                computation_dict["iterators"] = first_comp_dict["iterators"] + [
-                    child_iterator
-                ]
+class Gauss24(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss24", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 2
+        row_j = 4
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # change the ancestory of the second computation's computations to the first computation's ancestory
-        for computation in iterator_second_comp_dict["computations_list"]:
-            computation_dict = program_annotations["computations"][computation]
-            computation_dict["iterators"] = first_comp_dict["iterators"]
+class Gauss30(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss30", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 3
+        row_j = 0
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # empty the child iterators and computations of the second computation iterator
-        iterator_second_comp_dict["child_iterators"] = []
-        iterator_second_comp_dict["computations_list"] = []
+class Gauss31(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss31", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 3
+        row_j = 1
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        # Loop through the ancestors of the second computation's iterator and remove all empty iterators
-        current_iterator = iterator_second_comp
-        while current_iterator is not None:
-            current_iterator_dict = program_annotations["iterators"][current_iterator]
-            if (
-                len(current_iterator_dict["child_iterators"]) == 0
-                and len(current_iterator_dict["computations_list"]) == 0
-            ):
-                parent_iterator = current_iterator_dict["parent_iterator"]
-                if parent_iterator is not None:
-                    parent_iterator_dict = program_annotations["iterators"][
-                        parent_iterator
-                    ]
-                    parent_iterator_dict["child_iterators"].remove(current_iterator)
-                program_annotations["iterators"].pop(current_iterator)
-                current_iterator = parent_iterator
-            else:
-                break
+class Gauss32(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss32", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 3
+        row_j = 2
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
 
-        return program_annotations
+class Gauss34(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss34", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 3
+        row_j = 4
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
+
+class Gauss40(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss40", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 4
+        row_j = 0
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
+
+class Gauss41(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss41", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 4
+        row_j = 1
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
+
+class Gauss42(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss42", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 4
+        row_j = 2
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str
+
+class Gauss43(OtherAction):
+    def __init__(self, env_id: int = None, worker_id=""):
+        super().__init__(name="Gauss43", env_id=env_id, worker_id=worker_id)
+        
+    def set_comps(self, comps):
+        super().set_comps(comps)
+        row_i = 4
+        row_j = 3
+        matrix = np.copy(self.params[0])
+        for j in range(len(matrix[0])):
+            matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+        gauss_str = ".matrix_transform("+ ConvertService.numpy_array_to_string(matrix) +");"
+        optim_str = ""
+        for comp in self.comps:
+            self.comps_schedule[comp] = "A(row_i={},row_j={})".format(row_i,row_j)
+            optim_str += "\n\t{}".format(comp) + gauss_str
+            
+        self.legality_code_str = self.execution_code_str = optim_str

@@ -1,12 +1,20 @@
-import copy
-import json
-import re
-
-import numpy as np
-import torch
-
-from env_api.scheduler.models.action import Fusion
+import copy, re, torch, numpy as np, json
 from env_api.utils.exceptions import *
+import json
+import pickle
+import random
+import gc
+import sys
+import multiprocessing
+import shutil
+import resource
+from pathlib import Path
+import pandas as pd
+from tqdm import tqdm
+from scipy.stats import spearmanr
+import enum
+import os, psutil
+import sympy
 
 # Maximum sequence of transformations (reversal, interchange and skewing) allowed. Currently set to 4
 MAX_NUM_TRANSFORMATIONS = 4
@@ -16,27 +24,30 @@ MAX_TAGS = 16
 
 MAX_DEPTH = 5
 
+# Maximum length of expressions in the dataset
+MAX_EXPR_LEN = 66
+
 
 class ConvertService:
     @classmethod
-    def get_representation_template(
-        cls, program_json, no_sched_json, max_depth=MAX_DEPTH, train_device="cpu"
-    ):
-        # Set the max and min number of accesses allowed
+    def get_representation_template(cls, program_json, no_sched_json, train_device="cpu"):
+        # Set the max and min number of accesses allowed 
         max_accesses = 15
         min_accesses = 0
+    
         comps_repr_templates_list = []
         comps_expr_repr_templates_list = []
         comps_indices_dict = dict()
         comps_placeholders_indices_dict = dict()
-
+    
+        
         # Get the computations (program statements) dictionary and order them according to the absolute_order attribute
         computations_dict = program_json["computations"]
         ordered_comp_list = sorted(
             list(computations_dict.keys()),
             key=lambda x: computations_dict[x]["absolute_order"],
         )
-
+        # For each computation in the program
         for comp_index, comp_name in enumerate(ordered_comp_list):
             comp_dict = computations_dict[comp_name]
             expr_dict = comp_dict["expression_representation"]
@@ -44,28 +55,29 @@ class ConvertService:
             comps_expr_repr_templates_list.append(
                 cls.get_tree_expr_repr(expr_dict, comp_type)
             )
+            # Check if the computation accesses conform to the minimum and maximum allowed
             if len(comp_dict["accesses"]) > max_accesses:
                 raise NbAccessException
-
+            
             if len(comp_dict["accesses"]) < min_accesses:
                 raise NbAccessException
-
-            if len(comp_dict["iterators"]) > max_depth:
+            
+            # Check if the number of iterators for this computation doesn't surpass the maximum allowed
+            if len(comp_dict["iterators"]) > MAX_DEPTH:
                 raise LoopsDepthException
-
+        
             comp_repr_template = []
-
             comp_repr_template.append(+comp_dict["comp_is_reduction"])
-
+    
             iterators_repr = []
+            
             # Add a representation of each loop of this computation
             for iter_i, iterator_name in enumerate(comp_dict["iterators"]):
-                # TODOF does this work when iterators have the same name?
                 iterator_dict = program_json["iterators"][iterator_name]
                 # Create a unique code for each loop
                 c_code = "C" + str(comp_index)
                 l_code = c_code + "-L" + str(iter_i)
-
+                
                 # Add a placeholder for transformations applied to this loop
                 iterators_repr.extend(
                     [
@@ -77,56 +89,58 @@ class ConvertService:
                         l_code + "ShiftFactor",
                     ]
                 )
-
+            
             iterator_repr_size = int(len(iterators_repr) / len(comp_dict["iterators"]))
-
+            
             # Add padding incase the number of loops is lower than the max
             iterators_repr.extend(
-                [0] * iterator_repr_size * (max_depth - len(comp_dict["iterators"]))
+                [0] * iterator_repr_size * (MAX_DEPTH - len(comp_dict["iterators"]))
             )
-
+            
             # Add two tags for whether unrolling was applied and the unrolling factor
             iterators_repr.extend([c_code + "-Unrolled", c_code + "-UnrollFactor"])
-
+    
             # Add a placeholder for the other transformations to be applied (skewing, reversal and interchage)
-            iterators_repr.append(c_code + "-TransformationTagsStart")
-            iterators_repr.extend(["M"] * (MAX_TAGS * MAX_NUM_TRANSFORMATIONS - 2))
-            iterators_repr.append(c_code + "-TransformationTagsEnd")
-
+            # iterators_repr.append(c_code + "-TransformationTagsStart")
+            # iterators_repr.extend(["M"] * (MAX_TAGS * MAX_NUM_TRANSFORMATIONS - 2))
+            # iterators_repr.append(c_code + "-TransformationTagsEnd")
+            
+            iterators_repr.append(c_code + "-TransformationMatrixStart")
+            iterators_repr.extend(["M"] * (MAX_DEPTH * MAX_DEPTH - 2))
+            iterators_repr.append(c_code + "-TransformationMatrixEnd")
+            
             # Adding initial constraint matrix
-            iterators_repr.append(c_code + "-OgConstraintMatrixStart")
-            iterators_repr.extend(["C"] * ((max_depth + 1) * ((max_depth + 1) * 2) - 2))
-            iterators_repr.append(c_code + "-OgConstraintMatrixEnd")
-
-            # Adding initial constraint matrix
-            iterators_repr.append(c_code + "-OgConstraintVectorStart")
-            iterators_repr.extend(["V"] * (max_depth * 2 - 2))
-            iterators_repr.append(c_code + "-OgConstraintVectorEnd")
-
+            iterators_repr.append(c_code+'-OgConstraintMatrixStart')
+            iterators_repr.extend(['OgC']*((MAX_DEPTH*MAX_DEPTH*2)-2))
+            iterators_repr.append(c_code+'-OgConstraintMatrixEnd')
+            
+            # Adding initial constraint vector
+            iterators_repr.append(c_code+'-OgConstraintVectorStart')
+            iterators_repr.extend(['V']*(MAX_DEPTH*2-2))
+            iterators_repr.append(c_code+'-OgConstraintVectorEnd')
+            
             # Adding transformed constraint matrix
-            iterators_repr.append(c_code + "-ConstraintMatrixStart")
-            iterators_repr.extend(["C"] * ((max_depth + 1) * ((max_depth + 1) * 2) - 2))
-            iterators_repr.append(c_code + "-ConstraintMatrixEnd")
-
-            # Add the loop representation to the computation vector
+            iterators_repr.append(c_code+'-ConstraintMatrixStart')
+            iterators_repr.extend(['C']*((MAX_DEPTH*MAX_DEPTH*2)-2))
+            iterators_repr.append(c_code+'-ConstraintMatrixEnd')
+                                  
+            # Add the loop representation to the computation vector 
             comp_repr_template.extend(iterators_repr)
-
+            
             # Pad the write access matrix and add it to the representation
             padded_write_matrix = cls.pad_access_matrix(
-                cls.isl_to_write_matrix(comp_dict["write_access_relation"]), max_depth
+                cls.isl_to_write_matrix(comp_dict["write_access_relation"])
             )
             write_access_repr = [
                 comp_dict["write_buffer_id"] + 1
             ] + padded_write_matrix.flatten().tolist()
-
             comp_repr_template.extend(write_access_repr)
-
-            # Pad the read access matrix and add it to the representation
-            # Todo add details about the read accesses
+    
+            # Pad the read access matrix and add it to the representation 
             read_accesses_repr = []
             for read_access_dict in comp_dict["accesses"]:
                 read_access_matrix = cls.pad_access_matrix(
-                    read_access_dict["access_matrix"], max_depth
+                    read_access_dict["access_matrix"]
                 )
                 read_access_repr = (
                     [+read_access_dict["access_is_reduction"]]
@@ -134,33 +148,32 @@ class ConvertService:
                     + read_access_matrix.flatten().tolist()
                 )
                 read_accesses_repr.extend(read_access_repr)
-
-            access_repr_len = (max_depth + 1) * (max_depth + 2) + 1 + 1
-
+            access_repr_len = (MAX_DEPTH + 1) * (MAX_DEPTH + 2) + 1 + 1
             read_accesses_repr.extend(
                 [0] * access_repr_len * (max_accesses - len(comp_dict["accesses"]))
             )
-
             comp_repr_template.extend(read_accesses_repr)
-
+            
+            # Add the representation of this computation to the list of containing all computations
             comps_repr_templates_list.append(comp_repr_template)
-
+            
             # Create a mapping between the features and their position in the representation
             comps_indices_dict[comp_name] = comp_index
             for j, element in enumerate(comp_repr_template):
                 if isinstance(element, str):
                     comps_placeholders_indices_dict[element] = (comp_index, j)
-
+                
+            
         # Create a representation of the loops independantly from the computations
         loops_repr_templates_list = []
         loops_indices_dict = dict()
         loops_placeholders_indices_dict = dict()
-
+        
         for loop_index, loop_name in enumerate(program_json["iterators"]):
             # Create a unique code for each loop
             loop_repr_template = []
             l_code = "L" + loop_name
-
+            
             # Add a placeholder for transformations applied to this loop
             loop_repr_template.extend(
                 [
@@ -174,27 +187,21 @@ class ConvertService:
                     l_code + "ShiftFactor",
                 ]
             )
-
+            
             # Create a mapping between the features and their position in the representation
             loops_repr_templates_list.append(loop_repr_template)
             loops_indices_dict[loop_name] = loop_index
-
             for j, element in enumerate(loop_repr_template):
                 if isinstance(element, str):
                     loops_placeholders_indices_dict[element] = (loop_index, j)
-
-        # Make sure no fusion was applied on this version and get the original tree structure
+        
+        # Make sure no fusion was applied on this version and get the original tree structure 
         assert "fusions" not in no_sched_json or no_sched_json["fusions"] == None
-
         orig_tree_structure = no_sched_json["tree_structure"]
         tree_annotation = copy.deepcopy(orig_tree_structure)
-
-        prog_tree = cls.update_tree_atributes(
-            tree_annotation,
-            loops_indices_dict,
-            comps_indices_dict,
-            train_device=train_device,
-        )
+        
+        # Add necessary attributes to the tree_structure
+        prog_tree = cls.update_tree_atributes(tree_annotation, loops_indices_dict, comps_indices_dict, train_device="cpu")
 
         # adding padding to the expressions to get same size expressions
         max_exprs = 0
@@ -208,6 +215,7 @@ class ConvertService:
             )
         comps_expr_lengths = torch.tensor(lengths)
         comps_expr_repr_templates_list = torch.tensor([comps_expr_repr_templates_list])
+        
         return (
             prog_tree,
             comps_repr_templates_list,
@@ -222,31 +230,26 @@ class ConvertService:
     def update_tree_atributes(
         cls, node, loops_indices_dict, comps_indices_dict, train_device="cpu"
     ):
-        if "roots" in node:
+        if "roots" in node :
             for root in node["roots"]:
-                cls.update_tree_atributes(
-                    root,
-                    loops_indices_dict,
-                    comps_indices_dict,
-                    train_device=train_device,
-                )
+                cls.update_tree_atributes(root, loops_indices_dict, comps_indices_dict, train_device=train_device)
             return node
-        node["loop_index"] = loops_indices_dict[node["loop_name"]]
-        if node["computations_list"] != []:
-            node["computations_indices"] = [
-                comps_indices_dict[comp_name] for comp_name in node["computations_list"]
-            ]
 
+        node["loop_index"] = torch.tensor(loops_indices_dict[node["loop_name"]]).to(
+            train_device
+        )
+        if node["computations_list"] != []:
+            node["computations_indices"] = torch.tensor(
+                [
+                    comps_indices_dict[comp_name]
+                    for comp_name in node["computations_list"]
+                ]
+            ).to(train_device)
             node["has_comps"] = True
         else:
             node["has_comps"] = False
         for child_node in node["child_list"]:
-            cls.update_tree_atributes(
-                child_node,
-                loops_indices_dict,
-                comps_indices_dict,
-                train_device=train_device,
-            )
+            cls.update_tree_atributes(child_node, loops_indices_dict, comps_indices_dict, train_device=train_device)
         return node
 
     @classmethod
@@ -262,44 +265,44 @@ class ConvertService:
     @classmethod
     def get_expr_repr(cls, expr, comp_type):
         expr_vector = []
-        if expr == "add":
+        if(expr == "add"):
             expr_vector = [1, 0, 0, 0, 0, 0, 0, 0]
-        elif expr == "sub":
+        elif(expr == "sub"):
             expr_vector = [0, 1, 0, 0, 0, 0, 0, 0]
-        elif expr == "mul":
+        elif(expr == "mul"):
             expr_vector = [0, 0, 1, 0, 0, 0, 0, 0]
-        elif expr == "div":
+        elif(expr == "div"):
             expr_vector = [0, 0, 0, 1, 0, 0, 0, 0]
-        elif expr == "sqrt":
+        elif(expr == "sqrt"):
             expr_vector = [0, 0, 0, 0, 1, 0, 0, 0]
-        elif expr == "min":
+        elif(expr == "min"):
             expr_vector = [0, 0, 0, 0, 0, 1, 0, 0]
-        elif expr == "max":
-            expr_vector = [0, 0, 0, 1, 0, 0, 1, 0]
+        elif(expr == "max"):
+            expr_vector = [0, 0, 0, 0, 0, 0, 1, 0]
         else:
-            expr_vector = [0, 0, 0, 1, 0, 0, 0, 1]
-
+            expr_vector = [0, 0, 0, 0, 0, 0, 0, 1]
+        
         comp_type_vector = []
-        if comp_type == "int32":
+        if(comp_type == "int32"):
             comp_type_vector = [1, 0, 0]
-        elif comp_type == "float32":
+        elif(comp_type == "float32"):
             comp_type_vector = [0, 1, 0]
-        elif comp_type == "float64":
+        elif(comp_type == "float64"):
             comp_type_vector = [0, 0, 1]
-
+            
         return expr_vector + comp_type_vector
 
     @classmethod
-    def pad_access_matrix(cls, access_matrix, max_depth):
+    def pad_access_matrix(cls, access_matrix):
         access_matrix = np.array(access_matrix)
         access_matrix = np.c_[np.ones(access_matrix.shape[0]), access_matrix]
         access_matrix = np.r_[[np.ones(access_matrix.shape[1])], access_matrix]
-        padded_access_matrix = np.zeros((max_depth + 1, max_depth + 2))
+        padded_access_matrix = np.zeros((MAX_DEPTH + 1, MAX_DEPTH + 2))
         padded_access_matrix[
             : access_matrix.shape[0], : access_matrix.shape[1] - 1
         ] = access_matrix[:, :-1]
         padded_access_matrix[: access_matrix.shape[0], -1] = access_matrix[:, -1]
-
+    
         return padded_access_matrix
 
     @classmethod
@@ -370,6 +373,7 @@ class ConvertService:
                 for sub_level in level["child_list"]:
                     involved_comps = cls.get_involved_comps(sub_level)
                     for i in involved_comps:
+
                         comp_index = (
                             program_json["computations"][i]["absolute_order"] - 1
                         )
@@ -379,6 +383,7 @@ class ConvertService:
                 if len(level["child_list"]) == 1:
                     involved_comps = cls.get_involved_comps(level)
                     for i in involved_comps:
+
                         comp_index = (
                             program_json["computations"][i]["absolute_order"] - 1
                         )
@@ -388,6 +393,7 @@ class ConvertService:
                         involved_comps = cls.get_involved_comps(level)
                         static_dim = 0
                         for i in involved_comps:
+
                             comp_index = (
                                 program_json["computations"][i]["absolute_order"] - 1
                             )
@@ -413,7 +419,7 @@ class ConvertService:
     @classmethod
     def get_involved_comps(cls, node):
         result = []
-        if len(node) == 0:
+        if(len(node)==0): 
             return result
         for comp in node["computations_list"]:
             result.append(comp)
@@ -440,16 +446,20 @@ class ConvertService:
         tree = schedule_json["tree_structure"]
         level = tree
         iterators = []
-        to_explore = [root for root in tree["roots"]]
-        # to_explore.append(tree)
-        while to_explore:
+        to_explore = []
+        # only add the root that contains the computation we are looking for
+        for root in tree["roots"]:
+            if (comp_name in cls.get_involved_comps(root)):
+                to_explore.append(root)
+        
+        while(to_explore):
             level = to_explore.pop(0)
-            if comp_name in cls.get_involved_comps(level):
-                iterators.append(level["loop_name"])
-
+            if(comp_name in cls.get_involved_comps(level)):
+                iterators.append(level['loop_name'])
+                
             for element in level["child_list"]:
                 to_explore.append(element)
-
+        
         return iterators
 
     @classmethod
@@ -589,10 +599,27 @@ class ConvertService:
 
         elif transformation[0] == 3:
             assert transformation[4] < matrix_size and transformation[5] < matrix_size
+            x,y = cls.linear_diophantine_default(transformation[6], transformation[7])
             matrix[transformation[4], transformation[4]] = transformation[6]
             matrix[transformation[4], transformation[5]] = transformation[7]
+            matrix[transformation[5], transformation[4]] = x
+            matrix[transformation[5], transformation[5]] = y
 
         return matrix
+    
+    @classmethod
+    # return the representation of the numpy array in C as a string
+    def numpy_array_to_string(cls, arr):
+        # Convert the NumPy array to a list of lists
+        nested_lists = np.array(arr, dtype=np.int32).tolist()
+
+        # Convert each inner list to a string and join them with ', '
+        inner_strings = [', '.join(map(str, inner)) for inner in nested_lists]
+
+        # Enclose each inner string in curly braces and join them with ', '
+        mat_str = ', '.join(['{' + inner + '}' for inner in inner_strings])
+
+        return f'{{{mat_str}}}'
 
     @classmethod
     # transform the vectors into a series of matrices
@@ -611,11 +638,11 @@ class ConvertService:
     @classmethod
     def get_schedule_representation(
         cls,
-        schedule_object,
-        max_depth=MAX_DEPTH,
-    ):
+        schedule_object,    
+    ): 
         program_json = schedule_object.prog.annotations
         schedule_json = schedule_object.schedule_dict
+        schedule_mat = schedule_object.schedule_mat
         comps_repr_templates_list = schedule_object.repr.comps_repr_templates_list
         loops_repr_templates_list = schedule_object.repr.loops_repr_templates_list
         comps_placeholders_indices_dict = (
@@ -627,37 +654,51 @@ class ConvertService:
         # Create a copy of the templates to avoid modifying the values for other schedules
         comps_repr = copy.deepcopy(comps_repr_templates_list)
         loops_repr = copy.deepcopy(loops_repr_templates_list)
-
+        comps_expr_repr = []
+        
+        # Get an ordered list of computations from the program JSON
         computations_dict = program_json["computations"]
         ordered_comp_list = sorted(
             list(computations_dict.keys()),
             key=lambda x: computations_dict[x]["absolute_order"],
         )
-
+        
+        # For each computation
         for comp_index, comp_name in enumerate(ordered_comp_list):
             comp_dict = program_json["computations"][comp_name]
             comp_schedule_dict = schedule_json[comp_name]
-
+            
+            # Get the computation expression representation
+            expr_dict = comp_dict["expression_representation"]
+            comp_type = comp_dict["data_type"]
+            expression_representation = cls.get_tree_expr_repr(expr_dict, comp_type)
+            
+            # Padd the expression representtaion
+            expression_representation.extend([[0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]] * (MAX_EXPR_LEN - len(expression_representation)))
+            
+            # Add the expression representation for this computation to the output
+            comps_expr_repr.append(expression_representation)
+            
             fused_levels = []
-
+            
             # If fusion was applied, save which two loops were fused together
             if "fusions" in schedule_json and schedule_json["fusions"]:
                 for fusion in schedule_json["fusions"]:
                     if comp_name in fusion:
                         fused_levels.append(fusion[2])
-
+            
             c_code = "C" + str(comp_index)
             # Loop representation for this computation
             for iter_i, iterator_name in enumerate(comp_dict["iterators"]):
                 l_code = c_code + "-L" + str(iter_i)
-
+                
                 # Check whether parallelization was applied and put the tag in its corresponding position in the computation representation
                 parallelized = 0
                 if iterator_name == comp_schedule_dict["parallelized_dim"]:
                     parallelized = 1
                 p_index = comps_placeholders_indices_dict[l_code + "Parallelized"]
                 comps_repr[p_index[0]][p_index[1]] = parallelized
-
+                
                 # Check whether tiling was applied and put the tags in their corresponding position in the computation representation
                 tiled = 0
                 tile_factor = 0
@@ -665,34 +706,30 @@ class ConvertService:
                     iterator_name in comp_schedule_dict["tiling"]["tiling_dims"]
                 ):
                     tiled = 1
-                    tile_factor_index = comp_schedule_dict["tiling"][
-                        "tiling_dims"
-                    ].index(iterator_name)
+                    tile_factor_index = comp_schedule_dict["tiling"]["tiling_dims"].index(
+                        iterator_name
+                    )
                     tile_factor = int(
-                        comp_schedule_dict["tiling"]["tiling_factors"][
-                            tile_factor_index
-                        ]
+                        comp_schedule_dict["tiling"]["tiling_factors"][tile_factor_index]
                     )
                 p_index = comps_placeholders_indices_dict[l_code + "Tiled"]
                 comps_repr[p_index[0]][p_index[1]] = tiled
                 p_index = comps_placeholders_indices_dict[l_code + "TileFactor"]
                 comps_repr[p_index[0]][p_index[1]] = tile_factor
-
+    
                 # Check whether fusion was applied and put the tag in its corresponding position in the computation representation
                 fused = 0
                 if iter_i in fused_levels:
                     fused = 1
                 p_index = comps_placeholders_indices_dict[l_code + "Fused"]
                 comps_repr[p_index[0]][p_index[1]] = fused
-
+                
                 shifted = 0
                 shifting_factor = 0
-                if comp_schedule_dict["shiftings"]:
-                    for shifting in comp_schedule_dict["shiftings"]:
-                        if iterator_name.startswith(
-                            shifting[0]
-                        ):  # loof if the current loop is being shifted
-                            shifted = 1
+                if comp_schedule_dict['shiftings']:
+                    for shifting in comp_schedule_dict['shiftings']: 
+                        if iterator_name.startswith(shifting[0]): # loof if the current loop is being shifted
+                            shifted=1
                             shifting_factor = shifting[1]
                             break
                 p_index = comps_placeholders_indices_dict[l_code + "Shifted"]
@@ -705,80 +742,67 @@ class ConvertService:
             if comp_schedule_dict["unrolling_factor"]:
                 unrolled = 1
                 unroll_factor = int(comp_schedule_dict["unrolling_factor"])
-
+                
             p_index = comps_placeholders_indices_dict[c_code + "-Unrolled"]
             comps_repr[p_index[0]][p_index[1]] = unrolled
-
+            
             p_index = comps_placeholders_indices_dict[c_code + "-UnrollFactor"]
             comps_repr[p_index[0]][p_index[1]] = unroll_factor
-
+            
             # Check which transformations (interchange, reversal and skweing) were applied and add the padded vector representation to their corresponding position
-            padded_tags = cls.get_padded_transformation_tags(
-                program_json, schedule_json, comp_name, max_depth
+            # padded_tags = get_padded_transformation_tags(
+            #     program_json, schedule_json, comp_name
+            # )
+            
+            padded_matrix = cls.get_padded_transformation_matrix(
+                program_json, schedule_json, comp_name
             )
-
-            tags_start = comps_placeholders_indices_dict[
-                c_code + "-TransformationTagsStart"
-            ]
-
-            tags_end = comps_placeholders_indices_dict[
-                c_code + "-TransformationTagsEnd"
-            ]
-
-            nb_tags_elements = tags_end[1] - tags_start[1] + 1
-
-            assert len(padded_tags) == nb_tags_elements
-
-            comps_repr[tags_start[0]][tags_start[1] : tags_end[1] + 1] = padded_tags
-
-            ogc_start = comps_placeholders_indices_dict[
-                c_code + "-OgConstraintMatrixStart"
-            ]
-
-            ogc_end = comps_placeholders_indices_dict[c_code + "-OgConstraintMatrixEnd"]
-
+            
+            matrix_start = comps_placeholders_indices_dict[ c_code + "-TransformationMatrixStart" ]
+            
+            matrix_end = comps_placeholders_indices_dict[c_code + "-TransformationMatrixEnd"]
+            
+            nb_matrix_elements = matrix_end[1] - matrix_start[1] + 1
+            
+            assert len(padded_matrix) == nb_matrix_elements
+            
+            comps_repr[matrix_start[0]][matrix_start[1] : matrix_end[1] + 1] = padded_matrix
+            
+            # Add the padded original constraints matrix to the representation
+            ogc_start = comps_placeholders_indices_dict[c_code+'-OgConstraintMatrixStart']
+            
+            ogc_end = comps_placeholders_indices_dict[c_code+'-OgConstraintMatrixEnd']
+            
             nb_mat_elements = ogc_end[1] - ogc_start[1] + 1
-
-            max_depth_it = int(np.sqrt(nb_mat_elements / 2)) - 1
-
-            comps_repr[ogc_start[0]][ogc_start[1] : ogc_end[1] + 1] = (
-                cls.get_padded_initial_constrain_matrix(
-                    program_json, schedule_json, comp_name, max_depth_it
-                )
-                .flatten()
-                .tolist()
-            )
-
-            ogv_start = comps_placeholders_indices_dict[
-                c_code + "-OgConstraintVectorStart"
-            ]
-
-            ogv_end = comps_placeholders_indices_dict[c_code + "-OgConstraintVectorEnd"]
-
+            
+            assert(MAX_DEPTH*MAX_DEPTH*2 == nb_mat_elements)
+            
+            padded_coeff_mat, padded_constants_col = cls.get_padded_initial_iteration_domain(program_json, comp_name, pad=True)
+            
+            comps_repr[ogc_start[0]][ogc_start[1] : ogc_end[1] + 1 ] = padded_coeff_mat.flatten().tolist()
+            
+            
+            # Add the padded original constraints vector to the representation
+            ogv_start = comps_placeholders_indices_dict[c_code+'-OgConstraintVectorStart']
+            
+            ogv_end = comps_placeholders_indices_dict[c_code+'-OgConstraintVectorEnd']
+            
             nb_mat_elements = ogv_end[1] - ogv_start[1] + 1
-
-            comps_repr[ogv_start[0]][
-                ogv_start[1] : ogv_end[1] + 1
-            ] = cls.get_padded_second_side_of_the_constraint_equations_original(
-                program_json, schedule_json, comp_name, max_depth
-            )
-
-            c_start = comps_placeholders_indices_dict[c_code + "-ConstraintMatrixStart"]
-
-            c_end = comps_placeholders_indices_dict[c_code + "-ConstraintMatrixEnd"]
-
+            
+            comps_repr[ogv_start[0]][ogv_start[1] : ogv_end[1] + 1 ] = padded_constants_col.tolist()
+            
+            # Add the padded transformed constraints vector to the representation
+            c_start = comps_placeholders_indices_dict[c_code+'-ConstraintMatrixStart']
+            
+            c_end = comps_placeholders_indices_dict[c_code+'-ConstraintMatrixEnd']
+            
             nb_mat_elements = c_end[1] - c_start[1] + 1
-
-            max_depth_it = int(np.sqrt(nb_mat_elements / 2)) - 1
-
-            comps_repr[c_start[0]][c_start[1] : c_end[1] + 1] = (
-                cls.get_padded_transformed_constrain_matrix(
-                    program_json, schedule_json, comp_name, max_depth_it
-                )
-                .flatten()
-                .tolist()
-            )
-
+    
+            assert(MAX_DEPTH*MAX_DEPTH*2 == nb_mat_elements)
+            
+            comps_repr[c_start[0]][ c_start[1] : c_end[1] + 1 ] = cls.get_padded_transformed_iteration_domain(program_json, schedule_json, comp_name).flatten().tolist()
+            
+    
         # Fill the loop representation
         # Initialization
         loop_schedules_dict = dict()
@@ -792,136 +816,257 @@ class ConvertService:
             loop_schedules_dict[loop_name]["shift_factor"] = 0
             loop_schedules_dict[loop_name]["parallelized"] = 0
             loop_schedules_dict[loop_name]["fused"] = 0
-
+    
         for comp_index, comp_name in enumerate(ordered_comp_list):
             comp_schedule_dict = schedule_json[comp_name]
-
-            # Check whether tiling was applied
+            # If this computation was moved to a different loop nest through the application of fusion,
+            # we know that it will use the same iterators as the computations it was moved to.
+            # The two computations thus share the same schedule (Since we only apply loop transformations and they share the same loops)
+            if ("fusions" in schedule_json and schedule_json["fusions"]):
+                for fusion in schedule_json["fusions"]:
+                    if comp_name in fusion:
+                        iterator_comp_name = fusion[0]
+                        transf_loop_nest = program_json["computations"][iterator_comp_name]["iterators"].copy()
+                        comp_schedule_dict = schedule_json[iterator_comp_name]
+            
+            # Check whether tiling was applied 
             if comp_schedule_dict["tiling"]:
                 for tiled_loop_index, tiled_loop in enumerate(
                     comp_schedule_dict["tiling"]["tiling_dims"]
                 ):
                     loop_schedules_dict[tiled_loop]["tiled"] = 1
-                    assert loop_schedules_dict[tiled_loop][
-                        "tile_factor"
-                    ] == 0 or loop_schedules_dict[tiled_loop]["tile_factor"] == int(
-                        comp_schedule_dict["tiling"]["tiling_factors"][tiled_loop_index]
-                    )
+                    
+                    # Make sure this loop either hasn't yet been tiled or has beeen tiled by the same factor
+                    assert(loop_schedules_dict[tiled_loop]["tile_factor"] == 0 or loop_schedules_dict[tiled_loop]["tile_factor"] == int(
+                        comp_schedule_dict["tiling"]["tiling_factors"][tiled_loop_index]))
                     loop_schedules_dict[tiled_loop]["tile_factor"] = int(
                         comp_schedule_dict["tiling"]["tiling_factors"][tiled_loop_index]
                     )
-
-            # Check whether unrolling was applied
+                    
+            # Check whether unrolling was applied 
             if comp_schedule_dict["unrolling_factor"]:
-                comp_innermost_loop = cls.get_comp_iterators_from_tree_struct(
-                    schedule_json, comp_name
-                )[-1]
-                #             comp_innermost_loop = computations_dict[comp_name]["iterators"][-1]
+                
+                comp_innermost_loop = cls.get_comp_iterators_from_tree_struct(schedule_json, comp_name)[-1]
                 loop_schedules_dict[comp_innermost_loop]["unrolled"] = 1
-
-                assert loop_schedules_dict[comp_innermost_loop][
-                    "unroll_factor"
-                ] == 0 or loop_schedules_dict[comp_innermost_loop][
-                    "unroll_factor"
-                ] == int(
-                    comp_schedule_dict["unrolling_factor"]
-                )
-
-                loop_schedules_dict[comp_innermost_loop]["unroll_factor"] = int(
-                    comp_schedule_dict["unrolling_factor"]
-                )
-
-            # Check whether parallelization was applied
+                
+                # Make sure this loop either hasn't yet been unrolled or has beeen unrolled by the same factor
+                assert (loop_schedules_dict[comp_innermost_loop]["unroll_factor"] == 0 or loop_schedules_dict[comp_innermost_loop]["unroll_factor"] == int(comp_schedule_dict["unrolling_factor"]))
+                
+                loop_schedules_dict[comp_innermost_loop]["unroll_factor"] = int(comp_schedule_dict["unrolling_factor"])
+                
+            # Check whether parallelization was applied 
             if comp_schedule_dict["parallelized_dim"]:
-                loop_schedules_dict[comp_schedule_dict["parallelized_dim"]][
-                    "parallelized"
-                ] = 1
-
-            if comp_schedule_dict["shiftings"]:
-                for shifting in comp_schedule_dict["shiftings"]:
+                loop_schedules_dict[comp_schedule_dict["parallelized_dim"]]["parallelized"] = 1
+            
+            
+            if comp_schedule_dict['shiftings']:
+                for shifting in comp_schedule_dict['shiftings']: 
                     loop_schedules_dict[shifting[0]]["shifted"] = 1
                     loop_schedules_dict[shifting[0]]["shift_factor"] = shifting[1]
-
-        # Check whether fusion was applied
+            
+        # Check whether fusion was applied 
         if "fusions" in schedule_json and schedule_json["fusions"]:
             for fusion in schedule_json["fusions"]:
                 fused_loop1 = computations_dict[fusion[0]]["iterators"][fusion[2]]
                 fused_loop2 = computations_dict[fusion[1]]["iterators"][fusion[2]]
                 loop_schedules_dict[fused_loop1]["fused"] = 1
                 loop_schedules_dict[fused_loop2]["fused"] = 1
-
-        program_iterators = cls.get_comp_iterators_from_tree_struct(
-            schedule_json, comp_name
-        )
+                
+        
         # Get the index of each feature in the loop representation and replace it with the the information obtained from the schedule
         for loop_name in program_json["iterators"]:
             l_code = "L" + loop_name
-
+    
             p_index = loops_placeholders_indices_dict[l_code + "Parallelized"]
             loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name][
                 "parallelized"
             ]
-
+    
             p_index = loops_placeholders_indices_dict[l_code + "Tiled"]
             loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name]["tiled"]
             p_index = loops_placeholders_indices_dict[l_code + "TileFactor"]
             loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name][
                 "tile_factor"
             ]
-
+    
             p_index = loops_placeholders_indices_dict[l_code + "Unrolled"]
-            loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name][
-                "unrolled"
-            ]
+            loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name]["unrolled"]
             p_index = loops_placeholders_indices_dict[l_code + "UnrollFactor"]
             loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name][
                 "unroll_factor"
             ]
-
+            
             p_index = loops_placeholders_indices_dict[l_code + "Shifted"]
-            loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name][
-                "shifted"
-            ]
+            loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name]["shifted"]
             p_index = loops_placeholders_indices_dict[l_code + "ShiftFactor"]
             loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name][
                 "shift_factor"
             ]
-
+            
             p_index = loops_placeholders_indices_dict[l_code + "Fused"]
             loops_repr[p_index[0]][p_index[1]] = loop_schedules_dict[loop_name]["fused"]
-
-        if len(program_json["iterators"]) > len(program_iterators):
-            removed_iterators = list(
-                set(program_json["iterators"]) - set(program_iterators)
-            )
+        comp_transformed_iterators = cls.get_comp_iterators_from_tree_struct(schedule_json, comp_name)    
+        # Check if any iterators were removed because of fusion
+        if (len(program_json["iterators"])>len(comp_transformed_iterators)):
+            # If this is the case, add the missing vectors with zeros in all the transformations
+            removed_iterators = list(set(program_json["iterators"]) - set(comp_transformed_iterators))
             for loop_name in removed_iterators:
                 l_code = "L" + loop_name
-
+    
                 p_index = loops_placeholders_indices_dict[l_code + "Parallelized"]
                 loops_repr[p_index[0]][p_index[1]] = 0
-
+    
                 p_index = loops_placeholders_indices_dict[l_code + "Tiled"]
                 loops_repr[p_index[0]][p_index[1]] = 0
                 p_index = loops_placeholders_indices_dict[l_code + "TileFactor"]
                 loops_repr[p_index[0]][p_index[1]] = 0
-
+    
                 p_index = loops_placeholders_indices_dict[l_code + "Unrolled"]
                 loops_repr[p_index[0]][p_index[1]] = 0
                 p_index = loops_placeholders_indices_dict[l_code + "UnrollFactor"]
                 loops_repr[p_index[0]][p_index[1]] = 0
-
+                
                 p_index = loops_placeholders_indices_dict[l_code + "Shifted"]
                 loops_repr[p_index[0]][p_index[1]] = 0
                 p_index = loops_placeholders_indices_dict[l_code + "ShiftFactor"]
                 loops_repr[p_index[0]][p_index[1]] = 0
-
+                
                 p_index = loops_placeholders_indices_dict[l_code + "Fused"]
                 loops_repr[p_index[0]][p_index[1]] = 0
-
+    
+        
         loops_tensor = torch.unsqueeze(torch.FloatTensor(loops_repr), 0)
         computations_tensor = torch.unsqueeze(torch.FloatTensor(comps_repr), 0)
+        comps_expr_repr = torch.tensor([comps_expr_repr]).float()
+        
+        return computations_tensor, loops_tensor, comps_expr_repr
 
-        return computations_tensor, loops_tensor
+    @classmethod
+    def get_padded_initial_iteration_domain(cls, program_json, comp_name, pad=True):
+        #supports bounds of type ± i ± j ±...± cst and max(cst, iter)
+        comp_dict = program_json['computations'][comp_name] 
+        nb_dims = len(comp_dict['iterators'])
+        
+        coeff_mat = np.zeros((nb_dims*2,nb_dims),int)
+        constants_col = np.zeros((nb_dims*2),int)
+        
+        for i,iterator_name_row in enumerate(comp_dict['iterators']):# rows loop
+            
+            # set the diagonal-ish values
+            coeff_mat[i*2,i]=-1
+            coeff_mat[i*2+1,i]=1
+            
+            iterator_row_dict = program_json['iterators'][iterator_name_row]
+            
+            #get the simplified expression of the bounds
+            upper_bound = str(sympy.simplify(iterator_row_dict['upper_bound'])).replace(' ','')
+            lower_bound = str(sympy.simplify(iterator_row_dict['lower_bound'])).replace(' ','')
+            
+            # in some special cases, the lower bound of i appears as max(cst, iter) when iter<=i. The following is a non-general solution
+            if 'max' in lower_bound or 'Max' in lower_bound:
+                lower_bound = re.findall('[mM]ax\(.+,(.+)\)',lower_bound)[0]
+            
+            # find the iterator names and constants used in the bounds
+            iterators_in_upper = re.findall('[a-zA-Z]\w*', upper_bound)
+            constants_in_upper = re.findall('(?:^|\+|-)\d+', upper_bound)
+            iterators_in_lower = re.findall('[a-zA-Z]\w*', lower_bound)
+            constants_in_lower = re.findall('(?:^|\+|-)\d+', lower_bound)
+            
+            #if no constants used, set to 0
+            if not constants_in_upper:
+                constants_in_upper = [0]
+            else:
+                assert len(constants_in_upper)==1
+           
+            if not constants_in_lower:
+                constants_in_lower = [0]
+            else:
+                assert len(constants_in_lower)==1
+            
+            #for each iterator in the bounds expression, set the corresponding values in the matrix
+            for iter_name in iterators_in_upper:
+                col_idx = comp_dict['iterators'].index(iter_name)
+                if '-'+iter_name in upper_bound:
+                    coeff_mat[i*2+1,col_idx]=1
+                else:
+                    coeff_mat[i*2+1,col_idx]=-1
+            constants_col[i*2+1]= int(constants_in_upper[0])-1 #adding a -1 because we are representing a non-strict inequality
+            
+            for iter_name in iterators_in_lower:
+                col_idx = comp_dict['iterators'].index(iter_name)
+                if '-'+iter_name in upper_bound:
+                    coeff_mat[i*2,col_idx]=-1
+                else:
+                    coeff_mat[i*2,col_idx]=+1
+            constants_col[i*2]= -int(constants_in_lower[0])
+                    
+    #     constants_col = constants_col.reshape(-1,1)
+        
+        
+        # Add padding if requested
+        if pad:
+            padded_coeff_mat = np.pad(coeff_mat, [(0,MAX_DEPTH*2-nb_dims*2),(0,MAX_DEPTH-nb_dims)], mode='constant', constant_values=0)
+            
+    #         #Edit: this idea has been dropped.!! For consistency, The padding of the coefficients part is done by adding -1,1 in a diagonal-ish manner
+    #         for i in range(nb_dims,MAX_DEPTH):
+    #             padded_coeff_mat[i*2,i]=-1
+    #             padded_coeff_mat[i*2+1,i]=1
+                
+            padded_constants_col = np.pad(constants_col, [(0,MAX_DEPTH*2-nb_dims*2)], mode='constant', constant_values=0)
+            return padded_coeff_mat, padded_constants_col
+        else:
+            return coeff_mat, constants_col
+
+    
+    @classmethod
+    def get_padded_transformed_iteration_domain(cls, program_json, schedule_json, comp_name, pad=True):
+        # Extract the transformations matrix for this schedule
+        transformation_matrix = cls.get_transformation_matrix(program_json, schedule_json, comp_name)
+        
+        # Create the initial constraint matrix without any padding
+        A,b = cls.get_padded_initial_iteration_domain(program_json,comp_name, pad=False)
+        nb_dims = A.shape[1]
+            
+        # Get the inverse of the transformation matrix
+        inverse = np.linalg.inv(transformation_matrix)
+        
+        # Multiply thw two to gte the transformed constraint matrix
+        result = np.matmul(A, inverse)
+        result = np.array(result)
+        
+        if pad:
+            result = np.pad(result, [(0, (MAX_DEPTH)*2 - result.shape[0]), (0, MAX_DEPTH - result.shape[1])],
+            mode="constant",
+            constant_values=0)
+             #EDIT: Padding is done with zeros, this idea is no longer in use. ignore the following comment. ---   For consistency, The padding of the coefficients part is done by adding -1,1 in a diagonal-ish manner
+    #         for i in range(nb_dims,MAX_DEPTH):
+    #             result[i*2,i]=-1
+    #             result[i*2+1,i]=1
+            
+        return result
+    
+    @classmethod
+    # add padding to the transfomation matrix
+    def get_padded_transformation_matrix(
+        cls, program_json, schedule_json, comp_name
+    ):
+        # Extract information about the computation and the transformations that were applied from the json input
+        comp_dict = program_json["computations"][comp_name]
+        comp_schedule_dict = schedule_json[comp_name]
+        nb_iterators = len(comp_dict["iterators"])
+        
+        # Create the transformation matrix
+        global_matrix = np.identity(nb_iterators)
+        for transformation in comp_schedule_dict['transformations_list']:
+            transformation_matrix = cls.get_trasnformation_matrix_from_vector(transformation, nb_iterators)
+            global_matrix = np.dot(global_matrix, transformation_matrix) 
+        global_matrix = global_matrix.tolist()
+        
+        # Add padding to the matrix in case the number of iterators is less than MAX_DEPTH
+        padded_matrix = [item for sublist in global_matrix for item in sublist]
+        padded_matrix += [0]*(MAX_DEPTH*MAX_DEPTH - len(padded_matrix)) 
+        
+        return padded_matrix
 
     @classmethod
     # check whether the string contains an integer and return true if so
@@ -987,43 +1132,44 @@ class ConvertService:
     ) -> torch.Tensor:
         batch_size, _ = X.shape
         first_part = X[:, :33]
-        second_part = X[:, 33 : 33 + MAX_TAGS * num_transformations]
-        third_part = X[:, 33 + MAX_TAGS * num_transformations :]
+        second_part = X[:, 33 : 33 + MAX_DEPTH * MAX_DEPTH]
+        third_part = X[:, 33 + MAX_DEPTH * MAX_DEPTH :]
         vectors = []
         for i in range(num_transformations):
             vector = second_part[:, MAX_TAGS * i : MAX_TAGS * (i + 1)].reshape(
                 batch_size, 1, -1
             )
             vectors.append(vector)
-
         if pad:
             for i in range(pad_amount):
                 vector = torch.zeros_like(vector)
                 vectors.append(vector)
+                
         return (first_part, torch.cat(vectors[0:], dim=1), third_part)
 
     @classmethod
-    def get_tree_representation(
-        cls, comps_tensor, loops_tensor, expr_tensor, schedule_object
-    ):
+    def get_tree_representation(cls, comps_tensor, loops_tensor, comps_expr_repr, schedule_object):
         """
         This function returns the necessary dict and tensors to feed the cost model to get the speedup
         """
-        x = comps_tensor
-        batch_size, num_comps, __dict__ = x.shape
-        x = x.view(batch_size * num_comps, -1)
-        (first_part, vectors, third_part) = ConvertService.seperate_vector(
-            x, num_transformations=4, pad=False
-        )
-        first_part = first_part.view(batch_size, num_comps, -1)
-        third_part = third_part.view(batch_size, num_comps, -1)
+        # x = comps_tensor
+        # batch_size, num_comps, __dict__ = x.shape
+        # x = x.view(batch_size * num_comps, -1)
+        # (first_part, vectors, third_part) = ConvertService.seperate_vector(
+        #     x, num_transformations=4, pad=False
+        # )
+        # first_part = first_part.view(batch_size, num_comps, -1)
+        # third_part = third_part.view(batch_size, num_comps, -1)
         return (
             schedule_object.repr.prog_tree,
-            first_part,
-            vectors,
-            third_part,
+            # first_part,
+            # vectors,
+            # third_part,
+            comps_tensor,
             loops_tensor,
-            expr_tensor,
+            # schedule_object.repr.comps_expr_tensor,
+            # schedule_object.repr.comps_expr_lengths,
+            comps_expr_repr,
         )
 
     @classmethod
@@ -1072,9 +1218,7 @@ class ConvertService:
         decoded_comps = torch.from_numpy(cls.unpad_3D_vector(encoded_comps))
         decoded_loops = torch.from_numpy(cls.unpad_3D_vector(encoded_loops))
         decoded_comps_expr = torch.from_numpy(cls.unpad_4D_vector(encoded_comps_expr))
-        decoded_expr_loops = torch.from_numpy(
-            cls.unpad_1D_vector(encoded_expr_loops).astype("int32")
-        )
+        decoded_expr_loops = torch.from_numpy(cls.unpad_1D_vector(encoded_expr_loops).astype('int32'))
         x = decoded_comps
         batch_size, num_comps, __dict__ = x.shape
         x = x.view(batch_size * num_comps, -1)
@@ -1181,52 +1325,62 @@ class ConvertService:
         for z in trimmed_y[0]:
             if z[0][0] != np.inf:
                 gt.append(z.astype("float32").tolist())
-        return np.array([gt])
-
+        return np.array([gt])   
+    
     # TODO : add fusion schedule
-    @classmethod
-    def build_sched_string(cls, schedule_list) -> str:
+    @classmethod 
+    def build_sched_string(cls,schedule_list) -> str:
         # Prepare a dictionary of computations name to fill it with each action applied on every comp
         comps = {}
         # Map the schedules applied one by one
-        for schedule in schedule_list:
+        for schedule in schedule_list : 
             # schedule has comps_schedule which includes the comps that was invloved in the optimisation
             for key in schedule.comps_schedule.keys():
                 # Add the data from that schedule to the global comps dictionnary
-                if not key in comps or not comps[key]:
+                if(not key in comps or not comps[key]):
                     comps[key] = ""
                 comps[key] += schedule.comps_schedule[key]
-
         # Prepare the string and form it from the comps dictionary
         schedule_string = ""
-
-        # Check if the first optimization applied is fusion
-        if schedule_list and type(schedule_list[0].action) == Fusion:
-            schedule_string += schedule_list[0].fusion_str + ":"
-
         for key in comps.keys():
-            schedule_string += "{" + key + "}:" + comps[key]
+            schedule_string+= "{"+key+"}:"+comps[key]
         return schedule_string
+   
+
+    # TODO : The following 2 functions exist because we are building tree structure in python
+    # Once we get it from toramisu autocsheduler they should be removed from here
+    @classmethod
+    def nest_iterators(cls, root_iterator, iterators):
+        if root_iterator["child_iterators"] == []:
+            return {
+                "loop_name": root_iterator["loop_name"],
+                "computations_list": root_iterator["computations_list"],
+                "child_list": [],
+            }
+        subtrees = []
+        for loop_name in root_iterator["child_iterators"]:
+            child_iterator = iterators[loop_name]
+            child_iterator["loop_name"] = loop_name
+            sub_tree = cls.nest_iterators(child_iterator, iterators)
+            subtrees.append(sub_tree)
+        return {
+            "loop_name": root_iterator["loop_name"],
+            "computations_list": root_iterator["computations_list"],
+            "child_list": subtrees,
+        }
 
     @classmethod
-    def build_loop_nests(cls, parent, iterators):
-        tree = {}
-        tree["loop_name"] = parent
-        tree["computations_list"] = iterators[parent]["computations_list"]
-        child_trees = []
-        if iterators[parent]["child_iterators"]:
-            for iterator in iterators[parent]["child_iterators"]:
-                child_trees.append(cls.build_loop_nests(iterator, iterators))
+    def get_tree_structure(cls, program_annot):
+        iterators = program_annot["iterators"]
 
-        tree["child_list"] = child_trees
-        return tree
+        mentionned = []
+        for loop, content in iterators.items():
+            mentionned.extend(content["child_iterators"])
 
-    @classmethod
-    def build_tree_structure(cls, iters):
-        iterators = copy.deepcopy(iters)
-        roots = []
-        for iterator in iterators:
-            if not iterators[iterator]["parent_iterator"]:
-                roots.append(copy.copy(iterator))
+        possible_root = [loop for loop in iterators if loop not in mentionned]
+        assert len(possible_root) == 1
+        root_loop_name = possible_root[0]
 
-        return [cls.build_loop_nests(it, iterators) for it in roots]
+        root_iterator = program_annot["iterators"][root_loop_name]
+        root_iterator["loop_name"] = root_loop_name
+        return cls.nest_iterators(root_iterator, iterators)

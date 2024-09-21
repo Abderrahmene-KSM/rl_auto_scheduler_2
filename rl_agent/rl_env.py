@@ -1,7 +1,6 @@
 import json
 import math
 import os
-from collections import OrderedDict
 
 import grpc
 import gymnasium as gym
@@ -11,7 +10,7 @@ import torch
 from gymnasium import spaces
 from ray.rllib.env.env_context import EnvContext
 
-from config.config import Config
+from conf.config import Config
 from env_api.tiramisu_api import TiramisuEnvAPI
 from grpc_server.dataset_grpc_server.grpc_files import (
     tiramisu_function_pb2,
@@ -27,13 +26,13 @@ class TiramisuRlEnv(gym.Env):
         self.tiramisu_api = TiramisuEnvAPI(local_dataset=False)
         # self.dataset_actor: DatasetActor = config["dataset_actor"]
         # Define action and observation spaces
-        self.action_space = spaces.Discrete(33)
-        space = {
-            "embedding": spaces.Box(-np.inf, np.inf, shape=(362,)),
-            "actions_mask": spaces.Box(0, 1, shape=(33,)),
-        }
-        space = OrderedDict(sorted(space.items()))
-        self.observation_space = spaces.Dict(space)
+        self.action_space = spaces.Discrete(62) # hada probablement nbedlo fih
+        self.observation_space = spaces.Dict( # hada probablement nbedlo fih
+            {
+                "embedding": spaces.Box(-np.inf, np.inf, shape=(362,)), # hada probablement nbedlo fih
+                "actions_mask": spaces.Box(0, 1, shape=(62,)), # hada probablement nbedlo fih
+            }
+        )
         # The variable `self.worker_index` indexes which worker/actor is working on the chosen function, it will help us avoid problems during compiling,
         # by adding the index of the worker to the name of the worker in order to not interfer with the compilation of another node
         if isinstance(config, ray.rllib.env.env_context.EnvContext):
@@ -55,39 +54,39 @@ class TiramisuRlEnv(gym.Env):
             # read the ip and port from the server_address file
             self.ip_and_port = ""
             while self.ip_and_port == "":
-                with open("./server_address", "r") as f:
-                    self.ip_and_port = f.read()
+                with open("./server_address", "r") as f: 
+                    self.ip_and_port = f.readline().strip()
 
-            self.ip_and_port = self.ip_and_port.splitlines()[0]
-            function_name = (
-                ""
-                if options is None or "function_name" not in options
-                else options["function_name"]
-            )
-            with grpc.insecure_channel(self.ip_and_port) as channel:
-                stub = tiramisu_function_pb2_grpc.TiramisuDataServerStub(channel)
-                response = stub.GetTiramisuFunction(
-                    tiramisu_function_pb2.TiramisuFunctionName(
-                        name=function_name
-                    )  # You can also specify a function name like function550013
+            prog = None
+            while prog == None:
+                with grpc.insecure_channel(self.ip_and_port) as channel:
+                    stub = tiramisu_function_pb2_grpc.TiramisuDataServerStub(channel)             
+                    try:
+                        response = stub.GetTiramisuFunction(
+                            tiramisu_function_pb2.TiramisuFunctionName()
+                        )
+                    except grpc.RpcError as e:
+                        print(f"GRPC error occurred: {e}")
+                    except Exception as e:
+                        print(f"An unexpected error occurred: {e}")
+
+                cpp = (
+                    response.cpp[1:-1]
+                    .replace('\\"', '"')
+                    .replace("\\n", "\n")
+                    .replace("\\t", "\t")
                 )
+                prog_infos = (
+                    response.name,
+                    json.loads(response.content),
+                    cpp,
+                )
+                prog = self.tiramisu_api.set_program(*prog_infos)
 
-            cpp = (
-                response.cpp[1:-1]
-                .replace('\\"', '"')
-                .replace("\\n", "\n")
-                .replace("\\t", "\t")
-            )
-            prog_infos = (
-                response.name,
-                json.loads(response.content),
-                cpp,
-                response.wrapper,
-            )
+            embedded_tensor, actions_mask = prog
 
             # The shape of embedded_tensor : (180,)
-            # Shape of actions mask : (33,)
-            embedded_tensor, actions_mask = self.tiramisu_api.set_program(*prog_infos)
+            # Shape of actions mask : (62,)
             self.current_program = prog_infos[0]
 
         self.state = {
@@ -95,7 +94,6 @@ class TiramisuRlEnv(gym.Env):
             "embedding": self.preprocess_embeddings(embeddings=embedded_tensor),
             "actions_mask": actions_mask,
         }
-        self.state = OrderedDict(sorted(self.state.items()))
         self.previous_speedup = self.reward = 1
         self.done = self.truncated = False
         self.info = {}
@@ -107,8 +105,6 @@ class TiramisuRlEnv(gym.Env):
         speedup, embedded_tensor, legality, actions_mask = self.apply_flattened_action(
             action=action
         )
-        if speedup < 0:
-            speedup = 0.01
         instant_speedup = 1
         if legality and not self.done:
             self.state = {
@@ -119,14 +115,20 @@ class TiramisuRlEnv(gym.Env):
             }
 
             # If the action is legal , we divide the speedup of new sequence {A_0 .. A_i+1} by the speedup of
-            # the previous Sequnce {A_0 .. A_i} to get the speedup of the action {A_i+1}
-            instant_speedup = speedup / self.previous_speedup
-            self.previous_speedup = speedup
+            # the previous Sequence {A_0 .. A_i} to get the speedup of the action {A_i+1}
+            if action != 61:
+                # If the action is not Next
+                instant_speedup = speedup / self.previous_speedup
+                self.previous_speedup = speedup
 
-        self.reward = math.log(instant_speedup, 4)
+        max_speedup = np.inf
+        instant_speedup = np.clip(instant_speedup, 0, max_speedup)
 
-        if self.action_index == 14:
-            self.done = True
+        try:
+            self.reward = math.log(instant_speedup, 4) 
+        except ValueError as e:
+            print("Error:", e)
+            self.reward = 1
 
         # Update dataset on episode end
         if self.done:
@@ -137,14 +139,11 @@ class TiramisuRlEnv(gym.Env):
             with grpc.insecure_channel(self.ip_and_port) as channel:
                 stub = tiramisu_function_pb2_grpc.TiramisuDataServerStub(channel)
                 response = stub.SaveTiramisuFunction(
-                    tiramisu_function_pb2.TiramisuFunction(
+                    tiramisu_function_pb2.TiramisuFuction(
                         name=self.current_program,
                         content=json.dumps(tiramisu_program_dict),
                     )  # You can also specify a function name like function550013
                 )
-            # self.dataset_actor.update_dataset.remote(
-            #     self.current_program, tiramisu_program_dict
-            # )
 
         return self.state, self.reward, self.done, self.truncated, self.info
 
@@ -165,7 +164,7 @@ class TiramisuRlEnv(gym.Env):
             )
         elif action < 9:
             loop_level = action - 4
-            # Reversal from 0 to 4
+             # Reversal from 0 to 4
             (
                 speedup,
                 embedded_tensor,
@@ -194,8 +193,8 @@ class TiramisuRlEnv(gym.Env):
             ) = self.tiramisu_api.parallelize(
                 loop_level=loop_level, env_id=action, worker_id=self.worker_index
             )
-        elif action < 18:
-            loop_level = action - 14
+        elif  action < 18:
+            loop_level= action - 14
 
             speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.tile2D(
                 loop_level1=loop_level,
@@ -205,8 +204,8 @@ class TiramisuRlEnv(gym.Env):
                 env_id=action,
                 worker_id=self.worker_index,
             )
-        elif action < 22:
-            loop_level = action - 18
+        elif  action < 22:
+            loop_level= action -18
 
             speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.tile2D(
                 loop_level1=loop_level,
@@ -216,8 +215,8 @@ class TiramisuRlEnv(gym.Env):
                 env_id=action,
                 worker_id=self.worker_index,
             )
-        elif action < 26:
-            loop_level = action - 22
+        elif  action < 26:
+            loop_level= action - 22
 
             speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.tile2D(
                 loop_level1=loop_level,
@@ -233,9 +232,156 @@ class TiramisuRlEnv(gym.Env):
                 unrolling_factor=2**factor, env_id=action, worker_id=self.worker_index
             )
         elif action == 31:
-            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.fuse(
-                env_id=action, worker_id=self.worker_index
+            # The action add(0,1)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=0, col=1, env_id=action, worker_id=self.worker_index
             )
+        elif action == 32:
+            # The action add(0,2)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=0, col=2, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 33:
+            # The action add(1,2)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=1, col=2, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 34:
+            # The action add(0,3)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=0, col=3, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 35:
+            # The action add(1,3)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=1, col=3, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 36:
+            # The action add(2,3)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=2, col=3, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 37:
+            # The action add(0,4)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=0, col=4, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 38:
+            # The action add(1,4)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=1, col=4, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 39:
+            # The action add(2,4)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=2, col=4, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 40:
+            # The action add(3,4)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.add(
+                row=3, col=4, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 41:
+            # The action addrow(0,1)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=0, row_j=1, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 42:
+            # The action addrow(1,0)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=1, row_j=0, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 43:
+            # The action addrow(0,2)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=0, row_j=2, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 44:
+            # The action addrow(1,2)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=1, row_j=2, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 45:
+            # The action addrow(2,0)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=2, row_j=0, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 46:
+            # The action addrow(2,1)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=2, row_j=1, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 47:
+            # The action addrow(0,3)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=0, row_j=3, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 48:
+            # The action addrow(1,3)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=1, row_j=3, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 49:
+            # The action addrow(2,3)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=2, row_j=3, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 50:
+            # The action addrow(3,0)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=3, row_j=0, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 51:
+            # The action addrow(3,1)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=3, row_j=1, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 52:
+            # The action addrow(3,2)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=3, row_j=2, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 53:
+            # The action addrow(0,4)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=0, row_j=4, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 54:
+            # The action addrow(1,4)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=1, row_j=4, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 55:
+            # The action addrow(2,4)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=2, row_j=4, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 56:
+            # The action addrow(3,4)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=3, row_j=4, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 57:
+            # The action addrow(4,0)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=4, row_j=0, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 58:
+            # The action addrow(4,1)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=4, row_j=1, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 59:
+            # The action addrow(4,2)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=4, row_j=2, env_id=action, worker_id=self.worker_index
+            )
+        elif action == 60:
+            # The action addrow(4,3)
+            speedup, embedded_tensor, legality, actions_mask = self.tiramisu_api.addrow(
+                row_i=4, row_j=3, env_id=action, worker_id=self.worker_index
+            )
+
         else:
             # Next case
             next_branch = self.tiramisu_api.scheduler_service.next_branch()
@@ -244,7 +390,7 @@ class TiramisuRlEnv(gym.Env):
                     1,
                     None,
                     True,
-                    np.zeros(33),
+                    np.zeros(62),
                 )
                 self.done = True
             else:
@@ -258,6 +404,7 @@ class TiramisuRlEnv(gym.Env):
         return speedup, embedded_tensor, legality, actions_mask
 
     def preprocess_embeddings(self, embeddings: torch.Tensor, action=-1):
+        
         embeddings = torch.cat(
             (
                 *embeddings,

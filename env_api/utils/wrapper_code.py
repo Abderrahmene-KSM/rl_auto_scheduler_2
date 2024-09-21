@@ -1,4 +1,5 @@
 class WrappersCode:
+            
     wrapper_cpp_template = """#include "Halide.h"
     #include "$func_name$_wrapper.h"
     #include "tiramisu/utils.h"

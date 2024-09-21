@@ -1,44 +1,31 @@
-import logging
-import pprint as pp
 from typing import List
-
-import torch
-
-from config.config import Config
-from env_api.core.models.optim_cmd import OptimizationCommand
 from env_api.core.models.tiramisu_program import TiramisuProgram
 from env_api.core.services.converting_service import ConvertService
 from env_api.scheduler.models.branch import Branch
 from env_api.scheduler.services.legality_service import LegalityService
 from env_api.scheduler.services.prediction_service import PredictionService
-from env_api.utils.data_preprocessors import (
-    get_schedule_representation,
-    linear_diophantine_default,
-)
 from env_api.utils.exceptions import ExecutingFunctionException
-from env_api.utils.functions.fusion import transform_tree_for_fusion
-
-from ..models.action import *
 from ..models.schedule import Schedule
+from ..models.action import *
+from conf.config import Config
+import numpy as np
+import subprocess
+
 
 
 class SchedulerService:
     def __init__(self):
         # The Schedule object contains all the informations of a program : annotatons , tree representation ...
         self.schedule_object: Schedule = None
-        # The branches generated from the program tree
-        self.branches: List[Branch] = []
+        # The branches generated from the program tree 
+        self.branches : List[Branch] = []
         self.current_branch = 0
-        # Fusion phase
-        self.fusion_phase = True
-        # The list of comps for fusion
-        self.fusion_comps = []
-        self.current_comp = 0
         # The prediction service is an object that has a value estimator `get_predicted_speedup(schedule)` of the speedup that a schedule will have
         # This estimator is a recursive model that needs the schedule representation to give speedups
         self.prediction_service = PredictionService()
         # A schedules-legality service
         self.legality_service = LegalityService()
+        
 
     def set_schedule(self, schedule_object: Schedule):
         """
@@ -51,131 +38,54 @@ class SchedulerService:
         self.schedule_object = schedule_object
         # We create the branches of the program
         self.create_branches()
-        # Re-init the index to the 1st branch
+        # Init the index to the 1st branch
         self.current_branch = 0
+        main_repr = ConvertService.get_schedule_representation(schedule_object)
+        branch_repr = ConvertService.get_schedule_representation(self.branches[self.current_branch])
+        # Using the model to embed the main program and the branch in a 180 sized vector for each
 
-        self.create_list_comps()
-
-        return self.get_tensor_embeddings()
-
-    def create_list_comps(self):
-        comps = {}
-        comps_dict = self.schedule_object.prog.annotations["computations"]
-
-        # Disable fusion if there is only one comp
-        if len(comps_dict) < 2:
-            self.fusion_phase = False
-            self.schedule_object.unmask_actions()
-            return
-        for comp in comps_dict:
-            comps[comps_dict[comp]["absolute_order"]] = {
-                "name": comp,
-                "iterators": comps_dict[comp]["iterators"],
-            }
-        lst = []
-        for i in range(1, len(comps) + 1):
-            lst.append(comps[i])
-        # return a structure like this ordered by absolute order of comps:
-        # [{'name': 'comp00', 'depth': 2},
-        #  {'name': 'comp01', 'depth': 2},
-        #  {'name': 'comp02', 'depth': 2},
-        #  {'name': 'comp03', 'depth': 2}]
-        # The case of all comps in the same branch :
-        same_branch = True
-        its = lst[0]["iterators"]
-        for comp in lst[1:]:
-            if its != comp["iterators"]:
-                same_branch = False
-                break
-            else:
-                self.current_comp += 1
-
-        if same_branch:
-            self.fusion_phase = False
-            self.schedule_object.unmask_actions()
-        else:
-            self.fusion_comps = lst
-
-    def reset_schedule(self, new_annotations):
-        self.schedule_object.prog.annotations = new_annotations
-        self.schedule_object.unmask_actions()
-        self.create_branches()
-        # Re-init the index to the 1st branch
-        self.current_branch = 0
-
-        return self.get_tensor_embeddings()
-
-    def get_current_speedup(self):
-        repr_tensors = get_schedule_representation(self.schedule_object)
-        speedup, _ = self.prediction_service.get_predicted_speedup(
-            *repr_tensors, self.schedule_object
-        )
-        return speedup, self.schedule_object.schedule_str
+        _, main_embed = self.prediction_service.get_predicted_speedup(*main_repr,schedule_object)
+        _, branch_embed = self.prediction_service.get_predicted_speedup(*branch_repr,self.branches[self.current_branch])
+        return ([main_embed, branch_embed], 
+                self.branches[self.current_branch].actions_mask
+                )     
+  
 
     def create_branches(self):
         # Make sure to clear the branches of the previous function if there are ones
         self.branches.clear()
-        for branch in self.schedule_object.branches:
+        for branch in self.schedule_object.branches : 
             # Create a mock-up of a program from the data of a branch
             program_data = {
-                "program_annotation": branch["program_annotation"],
-                "schedules_legality": {},
-                "schedules_solver": {},
+                "program_annotation" : branch["annotations"],
+                "schedules_legality" : {},
+                "schedules_solver" : {}
             }
             # The Branch is an inherited class from Schedule, it has all its characteristics
-            new_branch = Branch(
-                TiramisuProgram.from_dict(
-                    self.schedule_object.prog.name, data=program_data, original_str=""
-                )
-            )
+            new_branch = Branch(TiramisuProgram.from_dict(self.schedule_object.prog.name,
+                                                          data=program_data,
+                                                          original_str=""))
             # The branch needs the original cpp code of the main function to calculate legality of schedules
             new_branch.prog.load_code_lines(self.schedule_object.prog.original_str)
             self.branches.append(new_branch)
-
-    def get_tensor_embeddings(self):
-        main_repr = get_schedule_representation(self.schedule_object)
-        branch_repr = get_schedule_representation(self.branches[self.current_branch])
-        # Using the model to embed the program and the branch in a 180 sized vector each
-        with torch.no_grad():
-            _, main_embed = self.prediction_service.get_predicted_speedup(
-                *main_repr, self.schedule_object
-            )
-            _, branch_embed = self.prediction_service.get_predicted_speedup(
-                *branch_repr, self.branches[self.current_branch]
-            )
-
-        return (
-            [main_embed, branch_embed],
-            self.branches[self.current_branch].repr.action_mask,
-        )
-
+            
     def next_branch(self):
-        # Switch to the next branch to optimize it
-        if self.fusion_phase:
-            for _ in self.fusion_comps[self.current_comp :]:
-                if self.current_comp == (len(self.fusion_comps) - 1):
-                    self.fusion_phase = False
-                    self.schedule_object.unmask_actions()
-                    break
-                elif (
-                    self.fusion_comps[self.current_comp]["iterators"]
-                    != self.fusion_comps[self.current_comp + 1]["iterators"]
-                ):
-                    break
-                else:
-                    self.current_comp += 1
-
-        else:
-            self.current_branch += 1
-            if self.current_branch == len(self.branches):
-                # This matks the finish of exploring the branches
-                return None
-        return self.get_tensor_embeddings()
-
-    def reset_branch_indicator(self):
-        self.current_branch = 0
-        self.schedule_object.unmask_actions()
-        return self.get_tensor_embeddings()
+        # Switch to the next branch to optimize it 
+        self.current_branch += 1
+        if (self.current_branch == len(self.branches)):
+            # This matks the finish of exploring the branches
+            return None
+        main_repr = ConvertService.get_schedule_representation(self.schedule_object)
+        branch_repr = ConvertService.get_schedule_representation(self.branches[self.current_branch])
+        # Using the model to embed the program and the branch in a 180 sized vector each
+  
+        _, main_embed = self.prediction_service.get_predicted_speedup(*main_repr,self.schedule_object)
+        _, branch_embed = self.prediction_service.get_predicted_speedup(*branch_repr,self.branches[self.current_branch])
+        
+        return ([main_embed, branch_embed], 
+                self.branches[self.current_branch].actions_mask
+                )
+                
 
     def apply_action(self, action: Action):
         """
@@ -184,371 +94,848 @@ class SchedulerService:
         output :
             - speedup : float , representation : tuple(tensor) , legality_check : bool
         """
-        if isinstance(action, Fusion):
-            action.params = self.fusion_comps[self.current_comp : self.current_comp + 2]
-            action.annotations = self.schedule_object.prog.annotations
-        legality_check = self.legality_service.is_action_legal(
-            schedule_object=self.schedule_object,
-            branches=self.branches,
-            current_branch=self.current_branch,
-            action=action,
-        )
-        if legality_check:
-            print(
-                f"{self.schedule_object.prog.name}: {OptimizationCommand(action, get_tiramisu_optim_str=False)} is legal"
-            )
-        else:
-            print(
-                f"{self.schedule_object.prog.name}: {OptimizationCommand(action, get_tiramisu_optim_str=False)} is illegal"
-            )
-
+        legality_check = self.legality_service.is_action_legal(schedule_object=self.schedule_object,
+                                                               branches=self.branches,
+                                                               current_branch=self.current_branch,
+                                                               action=action)
+        #print(action.name, ": ", action.params)
+        
+        speedup = 1
         embedding_tensor = None
-        speedup = Config.config.experiment.legality_speedup
         if legality_check:
-            if Config.config.tiramisu.env_type == "cpu":
-                # We are going to get the speedup by execution
-                try:
-                    if isinstance(action, Parallelization):
-                        self.apply_parallelization(action=action)
+            try :
+                self.update_schedule_dict(action)
+            except TypeError as e:
+                # If the execution went wrong remove it from the schedule list
+                # self.schedule_object.schedule_list.pop()
+                # # Rebuild the schedule string after removing the action 
+                # schdule_str = self.schedule_object.build_sched_string()
+                # # Storing the schedule string to use it later 
+                # self.schedule_object.schedule_str = schdule_str
+                #print("TypeError caught")
+                legality_check = False
+                speedup=1
+                
+            try : 
+                # After successfuly applying an action we get the new representation of the main schedule and the branch
+                main_repr_tensors = ConvertService.get_schedule_representation(
+                    self.schedule_object)
+                branch_repr_tensors = ConvertService.get_schedule_representation(
+                    self.branches[self.current_branch])
+                
+                # We mesure the speedup from the main schedule and we get the embeddings for both (main and branch)
+                speedup, main_embedding_tensor = self.prediction_service.get_predicted_speedup(
+                    *main_repr_tensors, self.schedule_object)
+                _, branch_embedding_tensor = self.prediction_service.get_predicted_speedup(
+                    *branch_repr_tensors, self.branches[self.current_branch])
+                
+                # We pach the 2 tensors to represent the program and the current branch
+                embedding_tensor = [main_embedding_tensor, branch_embedding_tensor]
+                
+                if Config.config.tiramisu.env_type == 'cpu' : 
+                    if (Config.config.dataset.is_benchmark):
+                        speedup = 1
+                    else :
+                        speedup = self.prediction_service.get_real_speedup(schedule_object=self.schedule_object)
 
-                    elif isinstance(action, Reversal):
-                        self.apply_reversal(action=action)
+                if isinstance(action, Tiling):
+                    action.apply_on_branches(self.branches, self.schedule_object.schedule_list)
+                    
+                elif isinstance(action, Unrolling):
+                    action.apply_on_branches(self.branches, self.current_branch)
+                
+                else : 
+                    action.apply_on_branches(self.branches)
 
-                    elif isinstance(action, Interchange):
-                        self.apply_interchange(action=action)
+            except ExecutingFunctionException as e :
+                # If the execution went wrong remove it from the schedule list
+                self.schedule_object.schedule_list.pop()
+                # Rebuild the scedule string after removing the action 
+                schdule_str = self.schedule_object.build_sched_string()
+                # Storing the schedule string to use it later 
+                self.schedule_object.schedule_str = schdule_str
+                legality_check = False
 
-                    elif isinstance(action, Tiling):
-                        self.apply_tiling(action=action)
+            except subprocess.CalledProcessError as e:
+                # If the execution went wrong remove it from the schedule list
+                self.schedule_object.schedule_list.pop()
+                # Rebuild the scedule string after removing the action 
+                schdule_str = self.schedule_object.build_sched_string()
+                # Storing the schedule string to use it later 
+                self.schedule_object.schedule_str = schdule_str
+                legality_check = False
+                speedup=1
 
-                    elif isinstance(action, Unrolling):
-                        self.apply_unrolling(action=action)
+            except TypeError as e:
+                # If the execution went wrong remove it from the schedule list
+                #print("TypeError caught")
+                self.schedule_object.schedule_list.pop()
+                # Rebuild the schedule string after removing the action 
+                schdule_str = self.schedule_object.build_sched_string()
+                # Storing the schedule string to use it later 
+                self.schedule_object.schedule_str = schdule_str
+                legality_check = False
+                speedup=1
 
-                    elif isinstance(action, Skewing):
-                        self.apply_skewing(action=action)
+        # if legality_check:
+        #     ##############################
+        #     action_log_string = f"{action.name}: {action.params}"
+        #     with open(f"/scratch/ss18596/dev9/act30_cpu/actions_files/act_file{action.worker_id}.txt", 'a') as file:
+        #         file.write(action_log_string + '\n')
+        #     ##############################
+        
+        return speedup, embedding_tensor, legality_check, self.branches[self.current_branch].actions_mask
 
-                    elif isinstance(action, Fusion):
-                        self.apply_fusion(action=action)
 
-                    speedup = self.prediction_service.get_real_speedup(
-                        schedule_object=self.schedule_object, branches=self.branches
-                    )
+    def update_schedule_dict(self, action):
+        if isinstance(action, Parallelization):
+            self.apply_parallelization(action=action)
 
-                    # After successfuly applying an action we get the new representation of the main schedule and the branch
-                    main_repr_tensors = get_schedule_representation(
-                        self.schedule_object
-                    )
-                    branch_repr_tensors = get_schedule_representation(
-                        self.branches[self.current_branch]
-                    )
+        elif isinstance(action, Reversal):
+            self.apply_reversal(action=action)
 
-                    # We mesure the speedup from the main schedule and we get the embeddings for both (main and branch)
-                    (
-                        _,
-                        main_embedding_tensor,
-                    ) = self.prediction_service.get_predicted_speedup(
-                        *main_repr_tensors, self.schedule_object
-                    )
-                    (
-                        _,
-                        branch_embedding_tensor,
-                    ) = self.prediction_service.get_predicted_speedup(
-                        *branch_repr_tensors, self.branches[self.current_branch]
-                    )
+        elif isinstance(action, Interchange):
+            self.apply_interchange(action=action)
 
-                    # We pach the 2 tensors to represent the program and the current branch
-                    embedding_tensor = [main_embedding_tensor, branch_embedding_tensor]
+        elif isinstance(action, Tiling):
+            self.apply_tiling(action=action)
+            
+        elif isinstance(action, Unrolling):
+            self.apply_unrolling(action=action)
 
-                    if isinstance(action, Fusion):
-                        # new_annotations = action.fuse_annotations(
-                        #     fusion_candidates=(action.params[0], action.params[1]),
-                        #     program_annotations_dict=self.schedule_object.prog.annotations,
-                        # )
-                        # self.reset_schedule(new_annotations)
-                        self.fusion_phase = False
+        elif isinstance(action, Skewing):
+            self.apply_skewing(action=action)
+        
+        elif isinstance(action, Add01):
+            self.apply_add01(action=action)
 
-                except ExecutingFunctionException as e:
-                    # If the execution went wring remove it from the schedule list
-                    self.schedule_object.schedule_list.pop()
-                    # Rebuild the scedule string after removing the action
-                    schdule_str = ConvertService.build_sched_string(
-                        self.schedule_object.schedule_list
-                    )
-                    # Storing the schedule string to use it later
-                    self.schedule_object.schedule_str = schdule_str
+        elif isinstance(action, Add02):
+            self.apply_add02(action=action)
 
-                    legality_check = False
+        elif isinstance(action, Add03):
+            self.apply_add03(action=action)
 
-            else:
-                # Case where Config.config.tiramisu.env_type == "model"
-                try:
-                    if isinstance(action, Parallelization):
-                        self.apply_parallelization(action=action)
+        elif isinstance(action, Add04):
+            self.apply_add04(action=action)
 
-                    elif isinstance(action, Reversal):
-                        self.apply_reversal(action=action)
+        elif isinstance(action, Add12):
+            self.apply_add12(action=action)
 
-                    elif isinstance(action, Interchange):
-                        self.apply_interchange(action=action)
+        elif isinstance(action, Add13):
+            self.apply_add13(action=action)
 
-                    elif isinstance(action, Tiling):
-                        self.apply_tiling(action=action)
+        elif isinstance(action, Add14):
+            self.apply_add14(action=action)
 
-                    elif isinstance(action, Unrolling):
-                        self.apply_unrolling(action=action)
+        elif isinstance(action, Add23):
+            self.apply_add23(action=action)
 
-                    elif isinstance(action, Skewing):
-                        self.apply_skewing(action=action)
-                    elif isinstance(action, Fusion):
-                        self.apply_fusion(action=action)
-                    # After successfuly applying an action we get the new representation of the main schedule and the branch
-                    main_repr_tensors = get_schedule_representation(
-                        self.schedule_object
-                    )
-                    branch_repr_tensors = get_schedule_representation(
-                        self.branches[self.current_branch]
-                    )
+        elif isinstance(action, Add24):
+            self.apply_add24(action=action)
 
-                    # We mesure the speedup from the main schedule and we get the embeddings for both (main and branch)
-                    (
-                        speedup,
-                        main_embedding_tensor,
-                    ) = self.prediction_service.get_predicted_speedup(
-                        *main_repr_tensors, self.schedule_object
-                    )
-                    (
-                        _,
-                        branch_embedding_tensor,
-                    ) = self.prediction_service.get_predicted_speedup(
-                        *branch_repr_tensors, self.branches[self.current_branch]
-                    )
+        elif isinstance(action, Add34):
+            self.apply_add34(action=action)
 
-                    # We pach the 2 tensors to represent the program and the current branch
-                    embedding_tensor = [main_embedding_tensor, branch_embedding_tensor]
+        elif isinstance(action, Gauss01):
+            self.apply_gauss01(action=action)
 
-                    if isinstance(action, Fusion):
-                        # new_annotations = action.fuse_annotations(
-                        #     fusion_candidates=(action.params[0], action.params[1]),
-                        #     program_annotations_dict=self.schedule_object.prog.annotations,
-                        # )
-                        # self.reset_schedule(new_annotations)
-                        self.fusion_phase = False
-                except KeyError as e:
-                    logging.error(f"This loop level: {e} doesn't exist")
-                    legality_check = False
-                except AssertionError as e:
-                    print("%" * 50)
-                    print("Used more than 4 transformations of I,R,S")
-                    print(self.schedule_object.prog.name)
-                    print(self.schedule_object.schedule_str)
-                    print(action.params)
-                    print(action.name)
-                    print("%" * 50)
-                    legality_check = False
-            print(
-                f"{self.schedule_object.prog.name}: schedule_str: {self.schedule_object.schedule_list} | speedup: {speedup}"
-            )
-        return (
-            speedup,
-            embedding_tensor,
-            legality_check,
-            self.branches[self.current_branch].repr.action_mask,
-        )
+        elif isinstance(action, Gauss02):
+            self.apply_gauss02(action=action)
+
+        elif isinstance(action, Gauss03):
+            self.apply_gauss03(action=action)
+
+        elif isinstance(action, Gauss04):
+            self.apply_gauss04(action=action)
+
+        elif isinstance(action, Gauss10):
+            self.apply_gauss10(action=action)
+
+        elif isinstance(action, Gauss12):
+            self.apply_gauss12(action=action)
+
+        elif isinstance(action, Gauss13):
+            self.apply_gauss13(action=action)
+
+        elif isinstance(action, Gauss14):
+            self.apply_gauss14(action=action)
+
+        elif isinstance(action, Gauss20):
+            self.apply_gauss20(action=action)
+
+        elif isinstance(action, Gauss21):
+            self.apply_gauss21(action=action)
+
+        elif isinstance(action, Gauss23):
+            self.apply_gauss23(action=action)
+
+        elif isinstance(action, Gauss24):
+            self.apply_gauss24(action=action)
+
+        elif isinstance(action, Gauss30):
+            self.apply_gauss30(action=action)
+
+        elif isinstance(action, Gauss31):
+            self.apply_gauss31(action=action)
+
+        elif isinstance(action, Gauss32):
+            self.apply_gauss32(action=action)
+
+        elif isinstance(action, Gauss34):
+            self.apply_gauss34(action=action)
+
+        elif isinstance(action, Gauss40):
+            self.apply_gauss40(action=action)
+
+        elif isinstance(action, Gauss41):
+            self.apply_gauss41(action=action)
+
+        elif isinstance(action, Gauss42):
+            self.apply_gauss42(action=action)
+
+        elif isinstance(action, Gauss43):
+            self.apply_gauss43(action=action)
+
 
     def apply_parallelization(self, action: Action):
         # Getting the first comp of the selected branch
         computation = list(self.branches[self.current_branch].it_dict.keys())[0]
         # Getting the name of the iterator that points to the loop_level
-        # action.params[0]] Represents the loop level
-        iterator = self.branches[self.current_branch].it_dict[computation][
-            action.params[0]
-        ]["iterator"]
+        # action.params[0]] Represents the loop level 
+        iterator = self.branches[self.current_branch].it_dict[computation][action.params[0]]["iterator"]
         # Add the tag of parallelized loop level to the computations of the action
         for comp in action.comps:
             # Update main schedule
             self.schedule_object.schedule_dict[comp]["parallelized_dim"] = iterator
-            for branch in self.branches:
+            for branch in self.branches : 
                 # Check for the branches that needs to be updated
-                if comp in branch.comps:
+                if (comp in branch.comps):
                     # Update the schedule
                     branch.schedule_dict[comp]["parallelized_dim"] = iterator
-                    # Update the actions mask
-                    branch.update_actions_mask(action=action)
+
 
     def apply_reversal(self, action):
-        # ['type_of_transformation', 'first_interchange_loop', 'second_interchange_loop',
-        # 'reversed_loop', 'first_skewing_loop', 'second_skewing_loop', 'third_skewing_loop',
-        # 'skew_parameter_1', 'skew_parameter_2', 'skew_parameter_3', 'skew_parameter_4',
-        # 'skew_parameter_5', 'skew_parameter_6', 'skew_parameter_7', 'skew_parameter_8', 'skew_parameter_9']
-        # Where the type_of_transformation tag is:
-        # 0 for no transformation being applied
-        # 1 for loop interchange
-        # 2 for loop reversal
-        # 3 for loop skewing
-        transformation = [2, 0, 0, action.params[0], 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+        # The tag representation is as follows:
+        #         ['type_of_transformation', 'first_interchange_loop', 'second_interchange_loop', 'reversed_loop', 'first_skewing_loop', 'second_skewing_loop', 'first_skew_factor', 'second_skew_factor']
+        #     Where the type_of_transformation tag is:
+        #       - 0 for no transformation being applied
+        #       - 1 for loop interchange
+        #       - 2 for loop reversal
+        #       - 3 for loop skewing
+        transformation = [2, 0, 0, action.params[0] , 0, 0, 0, 0]
 
         for comp in action.comps:
             # Update main schedule
-            self.schedule_object.schedule_dict[comp]["transformations_list"].append(
-                transformation
-            )
-            for branch in self.branches:
+            self.schedule_object.schedule_dict[comp]["transformations_list"].append(transformation)
+            # Update the matrice of transformations
+            self.schedule_object.schedule_mat[comp]["matrix"] = np.dot(self.schedule_object.schedule_mat[comp]["matrix"], ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]))
+            # mark the computation as transformed
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+            
+            for branch in self.branches : 
                 # Check for the branches that needs to be updated
-                if comp in branch.comps:
-                    # Update the schedule
-                    branch.schedule_dict[comp]["transformations_list"].append(
-                        transformation
-                    )
+                if (comp in branch.comps):
+                     # Update the schedule
+                    branch.schedule_dict[comp]["transformations_list"].append(transformation)
+                    # Update the matrice of transformations
+                    branch.schedule_mat[comp]["matrix"] = np.dot(branch.schedule_mat[comp]["matrix"], ConvertService.get_trasnformation_matrix_from_vector(transformation,branch.schedule_mat[comp]["nb_it"]))
+
+        for branch in self.branches : 
+            for comp in action.comps : 
+                if (comp in branch.comps):
                     # For the affine transformations we must keep track of how many of them are applied
                     # inside the variable branch.transformed , the limit is 4
-                    branch.transformed += 1
-                    # Update the actions mask
-                    branch.update_actions_mask(action=action)
+                    branch.transformed+=1
+                    break
 
     def apply_interchange(self, action):
-        # ['type_of_transformation', 'first_interchange_loop', 'second_interchange_loop',
-        # 'reversed_loop', 'first_skewing_loop', 'second_skewing_loop', 'third_skewing_loop',
-        # 'skew_parameter_1', 'skew_parameter_2', 'skew_parameter_3', 'skew_parameter_4',
-        # 'skew_parameter_5', 'skew_parameter_6', 'skew_parameter_7', 'skew_parameter_8', 'skew_parameter_9']
-        # Where the type_of_transformation tag is:
-        # 0 for no transformation being applied
-        # 1 for loop interchange
-        # 2 for loop reversal
-        # 3 for loop skewing
-        transformation = [
-            1,
-            action.params[0],
-            action.params[1],
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-        ]
+        # The tag representation is as follows:
+        #         ['type_of_transformation', 'first_interchange_loop', 'second_interchange_loop', 'reversed_loop', 'first_skewing_loop', 'second_skewing_loop', 'first_skew_factor', 'second_skew_factor']
+        #     Where the type_of_transformation tag is:
+        #       - 0 for no transformation being applied
+        #       - 1 for loop interchange
+        #       - 2 for loop reversal
+        #       - 3 for loop skewing
+        
+        transformation = [1, action.params[0], action.params[1], 0, 0, 0, 0, 0]
 
         for comp in action.comps:
             # Update main schedule
-            self.schedule_object.schedule_dict[comp]["transformations_list"].append(
-                transformation
-            )
-            for branch in self.branches:
+            self.schedule_object.schedule_dict[comp]["transformations_list"].append(transformation)
+            # Update the matrice of transformations
+            self.schedule_object.schedule_mat[comp]["matrix"] = np.dot(self.schedule_object.schedule_mat[comp]["matrix"], ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]))
+            # mark the computation as transformed
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+            
+            for branch in self.branches : 
                 # Check for the branches that needs to be updated
-                if comp in branch.comps:
-                    # Update the schedule
-                    branch.schedule_dict[comp]["transformations_list"].append(
-                        transformation
-                    )
+                if (comp in branch.comps):
+                     # Update the schedule
+                    branch.schedule_dict[comp]["transformations_list"].append(transformation)
+                    # Update the matrice of transformations
+                    branch.schedule_mat[comp]["matrix"] = np.dot(branch.schedule_mat[comp]["matrix"], ConvertService.get_trasnformation_matrix_from_vector(transformation,branch.schedule_mat[comp]["nb_it"]))
                     # For the affine transformations we must keep track of how many of them are applied
                     # inside the variable branch.transformed , the limit is 4
-                    branch.transformed += 1
-                    # Update the actions mask
-                    branch.update_actions_mask(action=action)
+        for branch in self.branches : 
+            for comp in action.comps : 
+                if (comp in branch.comps):
+                    # For the affine transformations we must keep track of how many of them are applied
+                    # inside the variable branch.transformed , the limit is 4
+                    branch.transformed+=1
+                    break
 
     def apply_skewing(self, action):
-        # ['type_of_transformation', 'first_interchange_loop', 'second_interchange_loop',
-        # 'reversed_loop', 'first_skewing_loop', 'second_skewing_loop', 'third_skewing_loop',
-        # 'skew_parameter_1', 'skew_parameter_2', 'skew_parameter_3', 'skew_parameter_4',
-        # 'skew_parameter_5', 'skew_parameter_6', 'skew_parameter_7', 'skew_parameter_8', 'skew_parameter_9']
-        # Where the type_of_transformation tag is:
-        # 0 for no transformation being applied
-        # 1 for loop interchange
-        # 2 for loop reversal
-        # 3 for loop skewing
-        x_1, x_2 = linear_diophantine_default(action.params[2], action.params[3])
-
+        # The tag representation is as follows:
+        #         ['type_of_transformation', 'first_interchange_loop', 'second_interchange_loop', 'reversed_loop', 'first_skewing_loop', 'second_skewing_loop', 'first_skew_factor', 'second_skew_factor']
+        #     Where the type_of_transformation tag is:
+        #       - 0 for no transformation being applied
+        #       - 1 for loop interchange
+        #       - 2 for loop reversal
+        #       - 3 for loop skewing
         transformation = [
-            3,
-            0,
-            0,
-            0,
-            action.params[0],
-            action.params[1],
-            0,
-            action.params[2],
-            action.params[3],
-            x_1,
-            x_2,
-            0,
-            0,
-            0,
-            0,
-            0,
+            3, 0, 0, 0, action.params[0], action.params[1], action.params[2], action.params[3]
         ]
 
         for comp in action.comps:
             # Update main schedule
-            self.schedule_object.schedule_dict[comp]["transformations_list"].append(
-                transformation
-            )
+            self.schedule_object.schedule_dict[comp]["transformations_list"].append(transformation)
+            # Update the matrice of transformations
+            self.schedule_object.schedule_mat[comp]["matrix"] = np.dot(self.schedule_object.schedule_mat[comp]["matrix"], ConvertService.get_trasnformation_matrix_from_vector(transformation,self.schedule_object.schedule_mat[comp]["nb_it"]))
+            # mark the computation as transformed
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+            
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    branch.schedule_dict[comp]["transformations_list"].append(transformation)
+                    # Update the matrice of transformations
+                    branch.schedule_mat[comp]["matrix"] = np.dot(branch.schedule_mat[comp]["matrix"], ConvertService.get_trasnformation_matrix_from_vector(transformation,branch.schedule_mat[comp]["nb_it"]))
+                    # For the affine transformations we must keep track of how many of them are applied
+                    # inside the variable branch.transformed , the limit is 4
+        for branch in self.branches : 
+            for comp in action.comps : 
+                if (comp in branch.comps):
+                    # For the affine transformations we must keep track of how many of them are applied
+                    # inside the variable branch.transformed , the limit is 4
+                    branch.transformed+=1
+                    break
+
+    def apply_tiling(self, action):
+        loop_levels = action.params[: len(action.params) // 2]
+        tile_sizes = action.params[len(action.params) // 2 :]
+        tiling_depth = len(loop_levels)
+        tiling_factors = [str(p) for p in tile_sizes]
+        for comp in action.comps:
+            tiling_dims = [
+                self.schedule_object.it_dict[comp][l]["iterator"]
+                for l in loop_levels
+            ]
+            tiling_dict = {
+                "tiling_depth": tiling_depth,
+                "tiling_dims": tiling_dims,
+                "tiling_factors": tiling_factors,
+            }
+
+            self.schedule_object.schedule_dict[comp]["tiling"] = tiling_dict
+            # print("The comp : ", comp)
+            # pp.pprint(self.schedule_object.schedule_dict[comp])
             for branch in self.branches:
                 # Check for the branches that needs to be updated
                 if comp in branch.comps:
-                    # Update the schedule
-                    branch.schedule_dict[comp]["transformations_list"].append(
-                        transformation
-                    )
-                    # For the affine transformations we must keep track of how many of them are applied
-                    # inside the variable branch.transformed , the limit is 4
-                    branch.transformed += 1
-                    # Update the actions mask
-                    branch.update_actions_mask(action=action)
+                    # Update the branch schedule
+                    branch.schedule_dict[comp]["tiling"] = tiling_dict
 
-    def apply_tiling(self, action):
-        for tiling in [action, *action.subtilings]:
-            loop_levels = tiling.params[: len(tiling.params) // 2]
-            tile_sizes = tiling.params[len(tiling.params) // 2 :]
-            tiling_depth = len(loop_levels)
-            tiling_factors = [str(p) for p in tile_sizes]
-            for comp in tiling.comps:
-                tiling_dims = [
-                    self.schedule_object.it_dict[comp][l]["iterator"]
-                    for l in loop_levels
-                ]
-                tiling_dict = {
-                    "tiling_depth": tiling_depth,
-                    "tiling_dims": tiling_dims,
-                    "tiling_factors": tiling_factors,
-                }
-                self.schedule_object.schedule_dict[comp]["tiling"] = tiling_dict
-                # print("The comp : ", comp)
-                # pp.pprint(self.schedule_object.schedule_dict[comp])
-                for branch in self.branches:
-                    # Check for the branches that needs to be updated
-                    if comp in branch.comps:
-                        # Update the branch schedule
-                        branch.schedule_dict[comp]["tiling"] = tiling_dict
-                        # Update the branch actions mask
-                        branch.update_actions_mask(action=action)
-                        # print(branch.repr.action_mask)
-                        # Update the additional loops
-                        branch.additional_loops = tiling_depth
-
-    def apply_fusion(self, action: Fusion):
-        self.schedule_object.schedule_dict["fusion"] = action.params
-        new_tree = action.get_tree_structure_after_fusion(
-            fusion_candidates=(action.params[0]["name"], action.params[1]["name"]),
-            program_annotations=self.schedule_object.prog.annotations,
-        )
-        self.schedule_object.schedule_dict["tree_structure"] = new_tree
 
     def apply_unrolling(self, action):
-        # Unrolling is always applied at the innermost level , so it includes only the computations from
+        # Unrolling is always applied at the innermost level , so it includes only the computations from 
         # one branch , no need to check if the action will update other branches besides the current one
         for comp in action.comps:
             # Update the main schedule
-            self.schedule_object.schedule_dict[comp]["unrolling_factor"] = str(
-                action.params[1]
-            )
-            # Update the branch schedule
-            self.branches[self.current_branch].schedule_dict[comp][
-                "unrolling_factor"
-            ] = str(action.params[1])
-            # Update the actions mask
-            self.branches[self.current_branch].update_actions_mask(action=action)
+            self.schedule_object.schedule_dict[comp]["unrolling_factor"] = str(action.params[1])
+            # Update the branch schedule 
+            self.branches[self.current_branch].schedule_dict[comp]["unrolling_factor"] = str(action.params[1])
+            
+    def apply_add01(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[0][1] = matrix[0][1] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+            
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[0][1] = matrix[0][1] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+
+
+    def apply_add02(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[0][2] = matrix[0][2] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[0][2] = matrix[0][2] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_add03(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[0][3] = matrix[0][3] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[0][3] = matrix[0][3] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+        
+
+    def apply_add04(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[0][4] = matrix[0][4] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[0][4] = matrix[0][4] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_add12(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[1][2] = matrix[1][2] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[1][2] = matrix[1][2] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_add13(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[1][3] = matrix[1][3] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[1][3] = matrix[1][3] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_add14(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[1][4] = matrix[1][4] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[1][4] = matrix[1][4] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_add23(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[2][3] = matrix[2][3] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[2][3] = matrix[2][3] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_add24(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[2][4] = matrix[2][4] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[2][4] = matrix[2][4] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+                    
+    def apply_add34(self, action):
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            matrix[3][4] = matrix[3][4] + 1
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+            for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[3][4] = matrix[3][4] + 1
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss01(self, action):
+        row_i = 0
+        row_j = 1
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+            
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss02(self, action):
+        row_i = 0
+        row_j = 2
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+            
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss03(self, action):
+        row_i = 0
+        row_j = 3
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss04(self, action):
+        row_i = 0
+        row_j = 4
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss10(self, action):
+        row_i = 1
+        row_j = 0
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss12(self, action):
+        row_i = 1
+        row_j = 2
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss13(self, action):
+        row_i = 1
+        row_j = 3
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss14(self, action):
+        row_i = 1
+        row_j = 4
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss20(self, action):
+        row_i = 2
+        row_j = 0
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+                    
+    def apply_gauss21(self, action):
+        row_i = 2
+        row_j = 1
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss23(self, action):
+        row_i = 2
+        row_j = 3
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss24(self, action):
+        row_i = 2
+        row_j = 4
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss30(self, action):
+        row_i = 3
+        row_j = 0
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss31(self, action):
+        row_i = 3
+        row_j = 1
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+                    
+    def apply_gauss32(self, action):
+        row_i = 3
+        row_j = 2
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss34(self, action):
+        row_i = 3
+        row_j = 4
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss40(self, action):
+        row_i = 4
+        row_j = 0
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss41(self, action):
+        row_i = 4
+        row_j = 1
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss42(self, action):
+        row_i = 4
+        row_j = 2
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True
+
+    def apply_gauss43(self, action):
+        row_i = 4
+        row_j = 3
+        for comp in action.comps:
+            matrix = self.schedule_object.schedule_mat[comp]["matrix"]
+            for j in range(len(matrix[0])):
+                matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+            self.schedule_object.schedule_mat[comp]["transformed"] = True
+
+        for branch in self.branches : 
+                # Check for the branches that needs to be updated
+                if (comp in branch.comps):
+                     # Update the schedule
+                    matrix = branch.schedule_mat[comp]["matrix"]
+                    matrix[row_i][j] = matrix[row_i][j] + matrix[row_j][j]
+                    branch.schedule_mat[comp]["transformed"] = True

@@ -1,11 +1,8 @@
-import random
-import time
-import traceback
-
-from config.config import Config
-from env_api.core.services.compiling_service import CompilingService
 from env_api.tiramisu_api import TiramisuEnvAPI
+from conf.config import Config
 from env_api.utils.exceptions import *
+import random, traceback, time
+from env_api.core.services.compiling_service import CompilingService
 
 if __name__ == "__main__":
     start = time.time()
@@ -16,8 +13,22 @@ if __name__ == "__main__":
     programs = tiramisu_api.get_programs()
     try:
         # Select a program randomly for example program = "function025885"
-        program: str = random.choice(programs)
-        # program = "function1363707"
+        #program: str = random.choice(programs)
+        #program = "function831603"
+        program = "function621568" #skew
+        #program = "function797112" #skew
+        #program = "function031353" # tile2D
+        #program = "function702185"  # tile2D
+        #program = "function820216"  # unroll
+        #program = "function777549"  # unroll
+        #program = "function828715" #unroll
+        #program = "function815886"
+        #program = "function820216"
+        #program = "function715151"
+        #program = "function695007"
+        #program = "function069502"
+        #program = "function733760"
+        
         print("Selected function : ", program)
         # set_program(str) creates all the necessary objects to start doing operations on a program
         # it returns an encoded representation specific to the RL system
@@ -29,45 +40,62 @@ if __name__ == "__main__":
             # We will use this None value of the representation in the RL system to reset the programs that has unsupported loop levels , access matrices ....
             pass
         else:
-            # After setting a program and checking if it is fully supported by our RL system, you can apply any action on it in any order
-            # And expect to get the speedup of the whole schedule, the representation and the result of legality check of the last operation
+          
+            # (
+            #     speedup,
+            #     embedding_tensor,
+            #     legality,
+            #     actions_mask,
+            # ) = tiramisu_api.reverse(loop_level=0, env_id=1)
+            
             # (
             #     speedup,
             #     embedding_tensor,
             #     legality,
             #     actions_mask,
             # ) = tiramisu_api.interchange(loop_level1=0,loop_level2=1, env_id=7)
-
+            
+            (speedup, embedding_tensor,
+             legality,actions_mask) = tiramisu_api.skew(loop_level1=0,loop_level2=1,env_id=2)
+            
+            # (speedup, embedding_tensor, legality, actions_mask,
+            # ) = tiramisu_api.unroll(unrolling_factor=2, env_id=7)
+            
             # (speedup, embedding_tensor,
-            #  legality,actions_mask) = tiramisu_api.skew(loop_level1=0,loop_level2=1,env_id=2)
-
+            #  legality,actions_mask) = tiramisu_api.tile2D(loop_level1=0,loop_level2=1,size_x=12,size_y=12,env_id=4)
+            
             # (speedup, embedding_tensor,
-            #  legality,actions_mask) = tiramisu_api.skew(loop_level1=1,loop_level2=2,env_id=2)
-            # (speedup, embedding_tensor, legality, actions_mask) = tiramisu_api.tile2D(
-            #     loop_level1=1, loop_level2=2, size_x=32, size_y=128, env_id=4
-            # )
+            # legality,actions_mask) = tiramisu_api.tile3D(loop_level1=0 , loop_level2=1,loop_level3=2,
+            #     size_x=128,size_y=128,size_z=128,env_id=17)
+            
+            # (
+            #     speedup,
+            #     embedding_tensor,
+            #     legality,
+            #     actions_mask,
+            # ) = tiramisu_api.fuse(loop_level=0, env_id=31)
+            
             # (
             #     speedup,
             #     embedding_tensor,
             #     legality,
             #     actions_mask,
             # ) = tiramisu_api.parallelize(loop_level=0, env_id=1)
-            (
-                speedup,
-                embedding_tensor,
-                legality,
-                actions_mask,
-            ) = tiramisu_api.fuse(env_id=31)
+            
+            # (
+            #    speedup,
+            #    embedding_tensor,
+            #    legality,
+            #    actions_mask,
+            # ) = tiramisu_api.add01(env_id=3)
 
-            # tiramisu_api.scheduler_service.next_branch()
-            # (speedup, embedding_tensor,
-            #  legality,actions_mask) = tiramisu_api.tile2D(loop_level1=0,loop_level2=1,size_x=12,size_y=12,env_id=4)
-            # (speedup, embedding_tensor, legality, actions_mask,
-            # ) = tiramisu_api.unroll(unrolling_factor=16, env_id=7)
-
-            # # (speedup, embedding_tensor,
-            # # legality,actions_mask) = tiramisu_api.tile3D(loop_level1=0 , loop_level2=1,loop_level3=2,
-            # #     size_x=128,size_y=128,size_z=128,env_id=17)
+            # (
+            #    speedup,
+            #    embedding_tensor,
+            #    legality,
+            #    actions_mask,
+            # ) = tiramisu_api.gauss01(env_id=3)
+           
             print("Speedup : ", speedup, " ", "Legality : ", legality)
 
         print("Time : ", time.time() - start)

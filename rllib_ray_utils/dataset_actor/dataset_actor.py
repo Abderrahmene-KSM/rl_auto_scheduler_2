@@ -1,6 +1,5 @@
 import ray
-
-import config.config as cfg
+import conf.config as cfg
 import env_api.core.models.tiramisu_program as tiramisu_program
 from rllib_ray_utils.dataset_actor.services.hybrid_data_service import HybridDataService
 from rllib_ray_utils.dataset_actor.services.pickle_data_service import PickleDataService
@@ -24,22 +23,10 @@ class DatasetActor:
     ):
         if config.dataset_format == cfg.DatasetFormat.PICKLE:
             self.dataset_service = PickleDataService(
-                config.dataset_path,
-                config.cpps_path,
-                config.save_path,
-                config.shuffle,
-                config.seed,
-                config.saving_frequency,
-            )
+                config.dataset_path, config.cpps_path, config.save_path, config.shuffle, config.seed, config.saving_frequency)
         elif config.dataset_format == cfg.DatasetFormat.HYBRID:
             self.dataset_service = HybridDataService(
-                config.dataset_path,
-                config.cpps_path,
-                config.save_path,
-                config.shuffle,
-                config.seed,
-                config.saving_frequency,
-            )
+                config.dataset_path, config.cpps_path, config.save_path, config.shuffle, config.seed, config.saving_frequency)
         else:
             raise ValueError("Unknown dataset format")
 
